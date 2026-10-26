@@ -1,18 +1,31 @@
-# caches and build output
-.cache/
+# Dataset and runtime directories; keep src/supermimic/data and scripts/data tracked.
+/data/
+/logs/
+/supermimic-reproduced/data/
+/supermimic-reproduced/logs/
+/supermimic-reproduced/.venv/
+
+# Environments, caches and build products
+.venv/
 __pycache__/
-*.pyc
-build_*.log
-# upstream checkout (pinned commit cloned by tools/setup.sh)
-IsaacLab/
-# third-party data (downloaded by tools/download_data.sh) and generated assets
-data/
-# training runs: checkpoints, logs
-logs/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.cache/
+build/
+dist/
+wandb/
+.env
+.env.*
+
+# Checkpoints, datasets and generated media
 *.pt
-# rendered videos and recorded trajectories (derived from CC BY-NC-ND LAFAN1 motions)
-*.mp4
+*.pth
 *.npz
-results/analysis/
-# third-party paper
+*.parquet
+*.h5
+*.hdf5
+*.onnx
+*.mp4
 *.pdf
