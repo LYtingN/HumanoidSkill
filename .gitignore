@@ -4,6 +4,9 @@
 /supermimic-reproduced/data/
 /supermimic-reproduced/logs/
 /supermimic-reproduced/.venv/
+/can-pnp/logs/
+/can-pnp/wheels/
+/can-pnp/.venv/
 
 # Environments, caches and build products
 .venv/
