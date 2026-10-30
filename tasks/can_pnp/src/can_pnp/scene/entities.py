@@ -21,8 +21,8 @@ import mujoco
 from mjlab.entity import EntityCfg
 from mjlab.utils.spec_config import LightCfg, MaterialCfg, TextureCfg
 
-from can_pnp import constants as C
-from can_pnp.config import SceneGeometryCfg
+from can_pnp.scene import constants as C
+from can_pnp.scene.config import SceneGeometryCfg
 from hskill.utils.colors import srgb
 
 _BOX = mujoco.mjtGeom.mjGEOM_BOX

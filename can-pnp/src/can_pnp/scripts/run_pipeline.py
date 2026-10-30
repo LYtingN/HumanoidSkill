@@ -45,13 +45,13 @@ import torch
 import tyro
 from mjlab.utils.lab_api.math import matrix_from_quat
 
-from can_pnp import mdp
-from can_pnp.config import CanPnpSceneCfg, LayoutCfg, SceneGeometryCfg
+from can_pnp.scene import mdp
+from can_pnp.scene.config import CanPnpSceneCfg, LayoutCfg, SceneGeometryCfg
 from hskill.embodiment.g1_aloha import BODY_JOINT_NAMES
 from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
-from can_pnp.env_cfg import CanPnpEnvCfgArgs, make_env
-from can_pnp.grasp_start import GraspStarts, apply_grasp_start
-from can_pnp.layout import layout_term
+from can_pnp.scene.env_cfg import CanPnpEnvCfgArgs, make_env
+from can_pnp.starts import GraspStarts, apply_grasp_start
+from can_pnp.scene.layout import layout_term
 from hskill.s1.sources import DatasetSource, DiffusionSource, StandSource, load_diffusion_policy
 from hskill.s0.controller import SuperMimicController
 from hskill.utils.plan_viz import PlanKeypoints

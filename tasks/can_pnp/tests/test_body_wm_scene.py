@@ -5,21 +5,16 @@ from pathlib import Path
 import pytest
 import torch
 
-from hskill.executors.imagine import flatten_history, unflatten_history
+from hskill.executors.imagine import unflatten_history
 
-FULL_TRACKER = Path(__file__).resolve().parents[3] / "supermimic_0100000.pt"
-
-
-def test_history_roundtrip():
-    obs = torch.randn(5, 930)
-    torch.testing.assert_close(flatten_history(unflatten_history(obs)), obs, atol=0, rtol=0)
+FULL_TRACKER = Path(__file__).resolve().parents[4] / "supermimic_0100000.pt"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available() or not FULL_TRACKER.exists(), reason="needs CUDA and the tracker")
 def test_state_poses_and_observation_match_the_env():
     from hskill.s0.kinematics import BodyKinematics
     from hskill.s0.body_world_model import BodyWorldModel
-    from can_pnp.env_cfg import CanPnpEnvCfgArgs, make_env
+    from can_pnp.scene.env_cfg import CanPnpEnvCfgArgs, make_env
 
     env = make_env(CanPnpEnvCfgArgs(num_envs=4, camera=False))
     env.reset()

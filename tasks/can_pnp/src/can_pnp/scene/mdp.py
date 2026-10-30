@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import torch
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
-from can_pnp.layout import layout_term
+from can_pnp.scene.layout import layout_term
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv

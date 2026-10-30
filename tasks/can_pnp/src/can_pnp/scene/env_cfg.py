@@ -31,9 +31,9 @@ from mjlab.viewer import ViewerConfig
 
 from hskill.embodiment import g1_aloha as C
 from hskill.embodiment.robot import robot_cfg
-from can_pnp import entities, mdp
-from can_pnp.config import CanPnpSceneCfg
-from can_pnp.layout import reset_can_pnp_layout
+from can_pnp.scene import entities, mdp
+from can_pnp.scene.config import CanPnpSceneCfg
+from can_pnp.scene.layout import reset_can_pnp_layout
 
 
 @dataclass

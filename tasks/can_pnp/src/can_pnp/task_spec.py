@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import torch
 
-from can_pnp.config import SceneGeometryCfg
+from can_pnp.scene.config import SceneGeometryCfg
 
 
 @dataclass

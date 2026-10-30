@@ -25,8 +25,8 @@ import torch
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.manager_base import ManagerTermBase
 
-from can_pnp.config import CanPnpSceneCfg
-from can_pnp.entities import CAN_BODY, CAN_LID
+from can_pnp.scene.config import CanPnpSceneCfg
+from can_pnp.scene.entities import CAN_BODY, CAN_LID
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv

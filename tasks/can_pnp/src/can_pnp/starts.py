@@ -19,13 +19,13 @@ from typing import TYPE_CHECKING
 import torch
 
 from hskill.embodiment import g1_aloha as C
-from can_pnp.layout import layout_term
+from can_pnp.scene.layout import layout_term
 from hskill.s0.controller import gripper_q
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
-GRASP_STARTS = Path(__file__).parent / "assets" / "grasp_starts.json"
+GRASP_STARTS = Path(__file__).parent / "scene" / "assets" / "grasp_starts.json"
 
 
 class GraspStarts:

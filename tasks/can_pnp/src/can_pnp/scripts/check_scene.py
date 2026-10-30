@@ -26,8 +26,8 @@ import torch
 import tyro
 from PIL import Image
 
-from can_pnp.env_cfg import CanPnpEnvCfgArgs, make_env
-from can_pnp.layout import layout_term
+from can_pnp.scene.env_cfg import CanPnpEnvCfgArgs, make_env
+from can_pnp.scene.layout import layout_term
 
 
 @dataclass

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import dataclasses
 
-from can_pnp.config import CanPnpSceneCfg, SceneGeometryCfg
-from can_pnp.env_cfg import CanPnpEnvCfgArgs, make_env
-from can_pnp.grasp_start import GraspStarts, apply_grasp_start
-from can_pnp.layout import layout_term
-from can_pnp.task import TaskCfg, TaskTracker
+from can_pnp.scene.config import CanPnpSceneCfg, SceneGeometryCfg
+from can_pnp.scene.env_cfg import CanPnpEnvCfgArgs, make_env
+from can_pnp.starts import GraspStarts, apply_grasp_start
+from can_pnp.scene.layout import layout_term
+from can_pnp.task_spec import TaskCfg, TaskTracker
 
 
 def task_cfg(args) -> TaskCfg:

@@ -22,7 +22,7 @@ noise policy (``hskill.s1.noise_policy.NoisePolicy``) and the object world model
    (more sim), a high tau doubles them, within [``imag_iters_min``, ``imag_iters_max``];
 4. imagination: up to ``imag_iters`` GRPO updates, each on ``imag_starts`` recorded decisions x
    ``imag_group`` noises scored by ``hskill.executors.imaginer.Imaginer`` (chunk returns of the sim task
-   potential, see ``can_pnp.task``, completed by the critic's value of the chunk end), each
+   potential, see ``can_pnp.task_spec``, completed by the critic's value of the chunk end), each
    stopped at ``imag_target_kl``, and all once the policy moved ``cycle_kl`` from the cycle's
    start (the simulator has the last word).
 """
@@ -52,7 +52,7 @@ from hskill.learners.critic import ValueCritic, critic_features
 from hskill.learners.grpo import Distributed, group_advantages, update
 from hskill.executors.imaginer import Imaginer
 from hskill.sim.collect import SimCollector
-from can_pnp.task import TaskTracker
+from can_pnp.task_spec import TaskTracker
 from hskill.sim.rollouts import Rollouts
 from experiments._task_setup import rollout_dependencies
 
