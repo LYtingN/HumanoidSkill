@@ -29,7 +29,8 @@ from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.viewer import ViewerConfig
 
-from can_pnp import constants as C
+from hskill.embodiment import g1_aloha as C
+from hskill.embodiment.robot import robot_cfg
 from can_pnp import entities, mdp
 from can_pnp.config import CanPnpSceneCfg
 from can_pnp.layout import reset_can_pnp_layout
@@ -110,7 +111,7 @@ def make_scene_cfg(a: CanPnpEnvCfgArgs) -> SceneCfg:
             terrain_type="plane", textures=(), materials=(), lights=entities.SCENE_LIGHTS
         ),
         entities={
-            "robot": entities.robot_cfg(a.hand_gravcomp),
+            "robot": robot_cfg(a.hand_gravcomp),
             "can": entities.can_cfg(g, g.can_initial_pos),
             "shelf_can": entities.can_cfg(g, (*shelf_xy, a.scene.layout.shelf_center_z)),
             "table": entities.table_cfg(g),

@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from can_pnp import constants as C
+from hskill.embodiment import g1_aloha as C
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv

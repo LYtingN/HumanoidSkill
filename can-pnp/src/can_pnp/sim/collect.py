@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 import torch
 
-from can_pnp import constants as C
+from hskill.embodiment import g1_aloha as C
 from can_pnp.body.imagine import PhiStep, unflatten_history
 from can_pnp.body.kinematics import BodyKinematics
 from can_pnp.dsrl import NoisePolicy, SteeredDiffusionSource

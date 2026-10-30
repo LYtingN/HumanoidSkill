@@ -18,13 +18,12 @@ from __future__ import annotations
 import math
 
 import mujoco
-from mjlab.actuator import BuiltinPositionActuatorCfg
-from mjlab.asset_zoo.robots.unitree_g1.g1_constants import G1_ARTICULATION, G1_XML
-from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.utils.spec_config import CollisionCfg, LightCfg, MaterialCfg, TextureCfg
+from mjlab.entity import EntityCfg
+from mjlab.utils.spec_config import LightCfg, MaterialCfg, TextureCfg
 
 from can_pnp import constants as C
 from can_pnp.config import SceneGeometryCfg
+from hskill.utils.colors import srgb
 
 _BOX = mujoco.mjtGeom.mjGEOM_BOX
 _CYLINDER = mujoco.mjtGeom.mjGEOM_CYLINDER
@@ -46,16 +45,6 @@ CABLE = (0.23, 0.48, 0.04)
 CAN_BODY = (0.065, 0.025, 0.105)
 CAN_LID = (0.105, 0.065, 0.155)
 CAN_SEAM = (0.065, 0.012, 0.095)
-ROBOT_BLACK = (0.05, 0.05, 0.05)
-# Link-name fragments whose visuals envs/isaaclab/config.py repaints ROBOT_BLACK.
-ROBOT_BLACK_PARTS = ("gripper", "finger", "aloha2", "head", "waist", "hip_pitch", "ankle_roll")
-
-
-def srgb(linear: tuple[float, float, float], alpha: float = 1.0) -> tuple[float, ...]:
-    def encode(c: float) -> float:
-        return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
-
-    return (*(encode(c) for c in linear), alpha)
 
 
 def _rotate(quat: tuple[float, float, float, float], v: tuple[float, float, float]):
@@ -68,85 +57,6 @@ def _rotate(quat: tuple[float, float, float, float], v: tuple[float, float, floa
 
 
 # ----------------------------------------------------------------------------- robot
-
-# FULL_COLLISION of mjlab's G1 (SuperMimic's training contacts: self collisions on, condim 1,
-# capsule feet condim 3 / friction 0.6), plus the ALOHA finger geoms with their MJCF
-# friction (1, 0.005, 0.0005) and condim 6 so grasps hold.
-_FOOT = r"^(left|right)_foot[1-7]_collision$"
-_GRIPPER = r"^(left|right)_gripper_.*$"
-ROBOT_COLLISION = CollisionCfg(
-    geom_names_expr=(".*_collision", _GRIPPER),
-    contype=1,
-    conaffinity=1,
-    condim={_FOOT: 3, _GRIPPER: 6, ".*": 1},
-    priority={_FOOT: 1, ".*": 0},
-    friction={_FOOT: (0.6,)},
-)
-
-
-def _hand_gravcomp(spec: mujoco.MjSpec) -> None:
-    """Cancel the weight the ALOHA gripper adds over the hand SuperMimic is trained with.
-
-    The mjlab G1 wrist_yaw_link (rubber hand) weighs 0.255 kg; with the adapter and gripper the
-    hand weighs 1.05 kg. Against the arm PD gains SuperMimic was trained with (shoulder / elbow
-    kp 14 Nm/rad) that sags the hand ~11 cm, more than the recorded lift. Gravity
-    compensation (MuJoCo ``gravcomp``, an upward force equal to the body weight, as a
-    feed-forward term on the real arm) leaves the arm the training hand's weight.
-    """
-    trained = mujoco.MjSpec.from_file(str(G1_XML)).body("left_wrist_yaw_link").mass
-    for side in ("left", "right"):
-        wrist = spec.body(f"{side}_wrist_yaw_link")
-        wrist.gravcomp = max(0.0, 1.0 - trained / wrist.mass)
-        for name in (f"{side}_gripper_base", f"{side}_aloha2_finger_left", f"{side}_aloha2_finger_right"):
-            spec.body(name).gravcomp = 1.0
-
-
-def _robot_spec(hand_gravcomp: bool = True) -> mujoco.MjSpec:
-    spec = mujoco.MjSpec.from_file(str(C.ROBOT_XML))
-    # mjlab's G1 carries a top light tracking the robot; the Isaac scene has no such light and it
-    # washes out the tabletop in the head camera.
-    for light in list(spec.lights):
-        spec.delete(light)
-    if hand_gravcomp:
-        _hand_gravcomp(spec)
-    black = srgb(ROBOT_BLACK)
-    for geom in spec.geoms:
-        if geom.contype or geom.conaffinity:
-            continue
-        body = geom.parent.name.lower()
-        mesh = (geom.meshname or "").lower()
-        if any(p in body for p in ROBOT_BLACK_PARTS) or any(
-            p in mesh for p in ("head", "waist_support")
-        ):
-            # G1 visuals carry a material (which overrides rgba); the ALOHA ones do not.
-            if geom.material:
-                geom.material = "black"
-            else:
-                geom.rgba = black
-    return spec
-
-
-def robot_cfg(hand_gravcomp: bool = True) -> EntityCfg:
-    grippers = BuiltinPositionActuatorCfg(
-        target_names_expr=C.GRIPPER_JOINT_NAMES,
-        stiffness=C.GRIPPER_STIFFNESS,
-        damping=C.GRIPPER_DAMPING,
-        effort_limit=C.GRIPPER_EFFORT_LIMIT,
-    )
-    joint_pos = dict(zip(C.BODY_JOINT_NAMES, C.DEPLOY_DEFAULT_ANGLES))
-    joint_pos.update({name: 0.0 for name in C.GRIPPER_JOINT_NAMES + C.MIRROR_GRIPPER_JOINT_NAMES})
-    return EntityCfg(
-        init_state=EntityCfg.InitialStateCfg(
-            pos=(0.0, 0.0, C.ROBOT_INIT_HEIGHT), joint_pos=joint_pos, joint_vel={".*": 0.0}
-        ),
-        spec_fn=lambda: _robot_spec(hand_gravcomp),
-        collisions=(ROBOT_COLLISION,),
-        articulation=EntityArticulationInfoCfg(
-            actuators=(*G1_ARTICULATION.actuators, grippers),
-            soft_joint_pos_limit_factor=G1_ARTICULATION.soft_joint_pos_limit_factor,
-        ),
-    )
-
 
 # ----------------------------------------------------------------------------- cans
 

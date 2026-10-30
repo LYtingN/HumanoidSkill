@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING
 import mujoco
 import numpy as np
 
-from can_pnp import constants as C
-from can_pnp.entities import _robot_spec
+from hskill.embodiment import g1_aloha as C
+from hskill.embodiment.robot import _robot_spec
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv

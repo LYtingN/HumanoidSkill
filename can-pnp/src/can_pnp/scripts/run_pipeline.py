@@ -47,7 +47,7 @@ from mjlab.utils.lab_api.math import matrix_from_quat
 
 from can_pnp import mdp
 from can_pnp.config import CanPnpSceneCfg, LayoutCfg, SceneGeometryCfg
-from can_pnp.constants import BODY_JOINT_NAMES
+from hskill.embodiment.g1_aloha import BODY_JOINT_NAMES
 from can_pnp.dsrl import NoisePolicy, SteeredDiffusionSource
 from can_pnp.env_cfg import CanPnpEnvCfgArgs, make_env
 from can_pnp.grasp_start import GraspStarts, apply_grasp_start

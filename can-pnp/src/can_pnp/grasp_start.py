@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from can_pnp import constants as C
+from hskill.embodiment import g1_aloha as C
 from can_pnp.layout import layout_term
 from can_pnp.pipeline import gripper_q
 

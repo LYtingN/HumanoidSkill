@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import torch
 
-from can_pnp import constants as C
+from hskill.embodiment import g1_aloha as C
 from can_pnp.body.imagine import PhiStep, imagine_body
 from can_pnp.body.kinematics import BodyKinematics
 from can_pnp.config import SceneGeometryCfg

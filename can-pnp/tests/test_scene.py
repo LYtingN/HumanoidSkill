@@ -29,7 +29,7 @@ def _geom_top(model, data, name):
 
 
 def test_robot_actuation(model):
-    from can_pnp.constants import BODY_JOINT_NAMES, GRIPPER_JOINT_NAMES
+    from hskill.embodiment.g1_aloha import BODY_JOINT_NAMES, GRIPPER_JOINT_NAMES
 
     # mjlab G1 actuators on the 29 body joints + 2 gripper actuators; mirrors follow by equality.
     assert model.nu == 31

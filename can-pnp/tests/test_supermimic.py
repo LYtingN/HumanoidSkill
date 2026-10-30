@@ -9,7 +9,7 @@ import pytest
 import torch
 from mjlab.utils.lab_api.math import matrix_from_quat, quat_from_euler_xyz
 
-from can_pnp import constants as C
+from hskill.embodiment import g1_aloha as C
 from can_pnp.supermimic import (
     FULL_GOAL_DIM,
     GOAL_DIM,

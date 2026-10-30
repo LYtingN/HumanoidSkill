@@ -29,7 +29,7 @@ import torch
 import torch.nn.functional as F
 from mjlab.utils.lab_api.math import matrix_from_quat, quat_apply_inverse, quat_inv, quat_mul
 
-from can_pnp import constants as C
+from hskill.embodiment import g1_aloha as C
 from can_pnp.odometry import LegKinematics, root_height_and_velocity
 from can_pnp.supermimic import (
     FULL_GOAL_DIM,
