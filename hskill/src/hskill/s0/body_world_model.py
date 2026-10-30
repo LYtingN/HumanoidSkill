@@ -1,4 +1,4 @@
-"""SuperMimic's body world model f_omega on can_pnp robot states.
+"""SuperMimic's body world model f_omega on G1 + ALOHA robot states.
 
 The tracker checkpoint of supermimic-reproduced also holds the world model it was trained with:
 ``s' = f(s, a, xi)`` over the 71-d robot state (MuJoCo layout, root position relative to the
@@ -10,10 +10,10 @@ env origin)
 with ``xi`` = [foot friction (1), encoder bias (29), torso COM offset (3)], and a termination
 head on the root height / tilt error against the reference. supermimic is imported from its
 checkout (its torch index pins conflict with this project's, so it is no package dependency),
-as Humanoid-Diffusion is in ``pipeline.load_diffusion_policy``.
+as Humanoid-Diffusion is in ``hskill.s1.sources.load_diffusion_policy``.
 
 The grippers are not part of the state: the world model was trained on the bare G1 hand, and
-the ALOHA gripper's weight is cancelled by gravity compensation (``entities._hand_gravcomp``).
+the ALOHA gripper's weight is cancelled by gravity compensation (``hskill.embodiment.robot._hand_gravcomp``).
 """
 
 from __future__ import annotations

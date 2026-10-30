@@ -23,10 +23,10 @@ import torch
 
 from hskill.embodiment import g1_aloha as C
 from can_pnp.body.imagine import PhiStep, unflatten_history
-from can_pnp.body.kinematics import BodyKinematics
-from can_pnp.dsrl import NoisePolicy, SteeredDiffusionSource
+from hskill.s0.kinematics import BodyKinematics
+from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
 from can_pnp.layout import layout_term
-from can_pnp.pipeline import SuperMimicController, gripper_opening
+from hskill.s0.controller import SuperMimicController, gripper_opening
 from can_pnp.sim.rollouts import Rollouts
 from can_pnp.task import TaskTracker
 

@@ -24,7 +24,7 @@ from hskill.embodiment.robot import _robot_spec
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
-    from can_pnp.pipeline import SuperMimicController
+    from hskill.s0.controller import SuperMimicController
 
 # name: (body, rgb)
 KEYPOINTS = {

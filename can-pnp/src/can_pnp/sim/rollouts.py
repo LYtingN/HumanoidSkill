@@ -12,12 +12,13 @@ import torch
 from mjlab.utils.nan_guard import NanGuard
 
 from can_pnp.config import CanPnpSceneCfg, SceneGeometryCfg
-from can_pnp.dsrl import NoisePolicy, SteeredDiffusionSource
+from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
 from can_pnp.env_cfg import CanPnpEnvCfgArgs, make_env
 from can_pnp.grasp_start import GraspStarts, apply_grasp_start
 from can_pnp.layout import layout_term
-from can_pnp.pipeline import SuperMimicController, load_diffusion_policy
-from can_pnp.supermimic import load_tracking_policy
+from hskill.s0.controller import SuperMimicController
+from hskill.s1.sources import load_diffusion_policy
+from hskill.s0.supermimic import load_tracking_policy
 from can_pnp.task import TaskCfg, TaskTracker
 
 # Held-out episodes of the diffusion policy's training split (dataset_report.json, seed 42).

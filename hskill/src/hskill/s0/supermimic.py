@@ -4,7 +4,7 @@ The tracker is a checkpoint of humanoid_skill/supermimic-reproduced (``policy.ne
 either ``deploy_obs`` + ``anchor_ori_obs`` (goal 646, below) or the full-observation default
 (goal 680: 10 frames of the 64 below + ref root linear velocity in its yaw frame (3) and
 ref root height (1), no anchor term). The diffusion reference has no root translation; for the
-full variant both come from leg kinematics (``can_pnp.odometry``). Inputs, read off the
+full variant both come from leg kinematics (``hskill.s0.odometry``). Inputs, read off the
 checkpoint's fixed scale vectors and config:
 
 * observation history (930): joint_pos - q0, joint_vel, base_ang_vel, projected_gravity and

@@ -6,7 +6,7 @@
     # eight GPUs: scripts/train_v3_8gpu.sh
 
 Frozen: DINOv3 + DiT (S1), the SuperMimic tracker and its body world model (S0). Trained: the
-noise policy (``can_pnp.dsrl.NoisePolicy``) and the object world model
+noise policy (``hskill.s1.noise_policy.NoisePolicy``) and the object world model
 (``can_pnp.object_wm``). Every cycle (steps 1-2 only every ``collect_every`` cycles):
 
 1. sim: one rollout of grasp-start episodes (8-step replans, a ``base_fraction`` of the envs on
@@ -43,9 +43,9 @@ import torch.distributed as dist
 import tyro
 
 from can_pnp.body.imagine import PhiStep
-from can_pnp.body.kinematics import BodyKinematics
-from can_pnp.body.world_model import DEFAULT_REPO, BodyWorldModel
-from can_pnp.dsrl import NoisePolicy, SteeredDiffusionSource
+from hskill.s0.kinematics import BodyKinematics
+from hskill.s0.body_world_model import DEFAULT_REPO, BodyWorldModel
+from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
 from can_pnp.object_wm.buffer import EpisodeBuffer
 from can_pnp.object_wm.model import ObjectWMCfg, ObjectWorldModel, object_loss
 from can_pnp.rl.critic import ValueCritic, critic_features

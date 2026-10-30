@@ -25,7 +25,7 @@ from mjlab.utils.lab_api.math import (
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
-    from can_pnp.body.world_model import BodyWorldModel
+    from hskill.s0.body_world_model import BodyWorldModel
 
 SIDES = ("left", "right")
 

@@ -22,7 +22,7 @@ import torch
 from mjlab.utils.lab_api.math import matrix_from_quat, quat_apply_inverse, yaw_quat
 from torch import nn
 
-from can_pnp.body.world_model import BodyWorldModel
+from hskill.s0.body_world_model import BodyWorldModel
 
 FEAT_DIM = 71 + 3 + 3 + 3 + 3 + 3 + 3 + 1 + 1
 

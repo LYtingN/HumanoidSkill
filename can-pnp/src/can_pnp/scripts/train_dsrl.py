@@ -6,7 +6,7 @@
     # eight GPUs (scripts/train_dsrl_8gpu.sh)
     torchrun --standalone --nproc-per-node 8 -m can_pnp.scripts.train_dsrl ...
 
-Policy: :class:`can_pnp.dsrl.NoisePolicy` chooses the DDIM initial noise of the frozen diffusion
+Policy: :class:`hskill.s1.noise_policy.NoisePolicy` chooses the DDIM initial noise of the frozen diffusion
 policy at every replan (8 control steps); the SuperMimic tracker executes the reference.
 
 GRPO: every iteration each env group restarts from one recorded grasp start (all envs of a
@@ -39,7 +39,7 @@ import torch
 import torch.distributed as dist
 import tyro
 
-from can_pnp.dsrl import NoisePolicy
+from hskill.s1.noise_policy import NoisePolicy
 from can_pnp.rl.grpo import Distributed, group_advantages, summarize, update
 from can_pnp.sim.rollouts import Rollouts
 

@@ -17,12 +17,12 @@ import torch
 
 from hskill.embodiment import g1_aloha as C
 from can_pnp.body.imagine import PhiStep, imagine_body
-from can_pnp.body.kinematics import BodyKinematics
+from hskill.s0.kinematics import BodyKinematics
 from can_pnp.config import SceneGeometryCfg
-from can_pnp.dsrl import SteeredDiffusionSource
+from hskill.s1.noise_policy import SteeredDiffusionSource
 from can_pnp.object_wm.model import ObjectWorldModel
-from can_pnp.odometry import LegKinematics
-from can_pnp.pipeline import reference_plan
+from hskill.s0.odometry import LegKinematics
+from hskill.s0.controller import reference_plan
 from can_pnp.rl.critic import ValueCritic, critic_features
 from can_pnp.task import TaskCfg, TaskTracker
 

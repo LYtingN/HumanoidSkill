@@ -17,8 +17,8 @@ from dataclasses import dataclass
 import torch
 from mjlab.utils.lab_api.math import quat_from_matrix
 
-from can_pnp.body.world_model import BodyWorldModel
-from can_pnp.supermimic import FUTURE_FRAMES, ReferenceTrajectory, TrackingPolicy
+from hskill.s0.body_world_model import BodyWorldModel
+from hskill.s0.supermimic import FUTURE_FRAMES, ReferenceTrajectory, TrackingPolicy
 
 OBS_FRAME_DIM = 93
 OBS_TERMS = (29, 29, 3, 3, 29)  # joint_pos, joint_vel, base_ang_vel, projected_gravity, actions

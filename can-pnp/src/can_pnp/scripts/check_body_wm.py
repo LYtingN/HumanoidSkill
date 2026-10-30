@@ -27,14 +27,15 @@ import tyro
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
 from can_pnp.body.imagine import PhiStep, imagine_body, reference_states
-from can_pnp.body.kinematics import BodyKinematics
-from can_pnp.body.world_model import DEFAULT_REPO, BodyWorldModel
+from hskill.s0.kinematics import BodyKinematics
+from hskill.s0.body_world_model import DEFAULT_REPO, BodyWorldModel
 from can_pnp.config import CanPnpSceneCfg, SceneGeometryCfg
-from can_pnp.dsrl import NoisePolicy, SteeredDiffusionSource
+from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
 from can_pnp.env_cfg import CanPnpEnvCfgArgs, make_env
 from can_pnp.grasp_start import GraspStarts, apply_grasp_start
-from can_pnp.pipeline import SuperMimicController, load_diffusion_policy
-from can_pnp.supermimic import load_tracking_policy
+from hskill.s0.controller import SuperMimicController
+from hskill.s1.sources import load_diffusion_policy
+from hskill.s0.supermimic import load_tracking_policy
 
 REPORT_STEPS = (1, 4, 8, 16, 24, 32)
 

@@ -13,7 +13,7 @@ import os
 import torch
 import torch.distributed as dist
 
-from can_pnp.dsrl import NoisePolicy
+from hskill.s1.noise_policy import NoisePolicy
 
 
 class Distributed:

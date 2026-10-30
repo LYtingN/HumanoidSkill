@@ -48,19 +48,14 @@ from mjlab.utils.lab_api.math import matrix_from_quat
 from can_pnp import mdp
 from can_pnp.config import CanPnpSceneCfg, LayoutCfg, SceneGeometryCfg
 from hskill.embodiment.g1_aloha import BODY_JOINT_NAMES
-from can_pnp.dsrl import NoisePolicy, SteeredDiffusionSource
+from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
 from can_pnp.env_cfg import CanPnpEnvCfgArgs, make_env
 from can_pnp.grasp_start import GraspStarts, apply_grasp_start
 from can_pnp.layout import layout_term
-from can_pnp.pipeline import (
-    DatasetSource,
-    DiffusionSource,
-    StandSource,
-    SuperMimicController,
-    load_diffusion_policy,
-)
-from can_pnp.plan_viz import PlanKeypoints
-from can_pnp.supermimic import load_tracking_policy
+from hskill.s1.sources import DatasetSource, DiffusionSource, StandSource, load_diffusion_policy
+from hskill.s0.controller import SuperMimicController
+from hskill.utils.plan_viz import PlanKeypoints
+from hskill.s0.supermimic import load_tracking_policy
 
 
 @dataclass

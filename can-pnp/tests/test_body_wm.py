@@ -17,8 +17,8 @@ def test_history_roundtrip():
 
 @pytest.mark.skipif(not torch.cuda.is_available() or not FULL_TRACKER.exists(), reason="needs CUDA and the tracker")
 def test_state_poses_and_observation_match_the_env():
-    from can_pnp.body.kinematics import BodyKinematics
-    from can_pnp.body.world_model import BodyWorldModel
+    from hskill.s0.kinematics import BodyKinematics
+    from hskill.s0.body_world_model import BodyWorldModel
     from can_pnp.env_cfg import CanPnpEnvCfgArgs, make_env
 
     env = make_env(CanPnpEnvCfgArgs(num_envs=4, camera=False))

@@ -10,7 +10,7 @@ import torch
 from mjlab.utils.lab_api.math import matrix_from_quat, quat_from_euler_xyz
 
 from hskill.embodiment import g1_aloha as C
-from can_pnp.supermimic import (
+from hskill.s0.supermimic import (
     FULL_GOAL_DIM,
     GOAL_DIM,
     ReferenceTrajectory,
@@ -107,7 +107,7 @@ def test_full_goal_features():
 
 
 def test_leg_odometry_matches_mujoco():
-    from can_pnp.odometry import LegKinematics, root_height_and_velocity
+    from hskill.s0.odometry import LegKinematics, root_height_and_velocity
 
     model = mujoco.MjModel.from_xml_path(str(C.ROBOT_XML))
     data = mujoco.MjData(model)
@@ -134,7 +134,7 @@ def test_leg_odometry_matches_mujoco():
 
 @pytest.mark.skipif(not TRACKER.exists(), reason="SuperMimic checkpoint not present")
 def test_tracker_checkpoint_loads():
-    from can_pnp.supermimic import OBS_DIM, load_tracking_policy
+    from hskill.s0.supermimic import OBS_DIM, load_tracking_policy
 
     policy = load_tracking_policy(TRACKER, device="cpu")
     action = policy(torch.zeros(3, OBS_DIM), torch.zeros(3, GOAL_DIM))
@@ -143,7 +143,7 @@ def test_tracker_checkpoint_loads():
 
 @pytest.mark.skipif(not FULL_TRACKER.exists(), reason="full-observation SuperMimic checkpoint not present")
 def test_full_tracker_checkpoint_loads():
-    from can_pnp.supermimic import OBS_DIM, load_tracking_policy
+    from hskill.s0.supermimic import OBS_DIM, load_tracking_policy
 
     policy = load_tracking_policy(FULL_TRACKER, device="cpu")
     assert policy.goal_dim == FULL_GOAL_DIM

@@ -20,7 +20,7 @@ import torch
 
 from hskill.embodiment import g1_aloha as C
 from can_pnp.layout import layout_term
-from can_pnp.pipeline import gripper_q
+from hskill.s0.controller import gripper_q
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
