@@ -19,9 +19,11 @@ export MUJOCO_GL="${MUJOCO_GL:-disable}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 
 mkdir -p "$OUTPUT_DIR"
-# Rendezvous on 127.0.0.1 rather than --standalone: where localhost resolves only to ::1 (as on
-# remote-26) the standalone store's clients time out.
-exec .venv/bin/torchrun --rdzv-backend c10d --rdzv-endpoint "127.0.0.1:${MASTER_PORT:-29531}" --nnodes 1 \
+# Static rendezvous on 127.0.0.1 and a fixed port rather than --standalone: where localhost
+# resolves only to ::1 (as on remote-26) the standalone store's clients time out, and the c10d
+# rendezvous listens on an ephemeral port, which fails once those are used up (remote-26: an IDE
+# port forward holding ~28k loopback connections).
+exec .venv/bin/torchrun --master-addr 127.0.0.1 --master-port "${MASTER_PORT:-29531}" --nnodes 1 \
   --nproc-per-node "$NPROC" -m can_pnp.scripts.train_dsrl \
   --tracker-checkpoint "$TRACKER" --diffusion-checkpoint "$DIFFUSION" \
   --diffusion-repo "$DIFFUSION_REPO" --out-dir "$OUTPUT_DIR" "$@"

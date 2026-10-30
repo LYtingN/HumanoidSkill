@@ -165,8 +165,9 @@ class ReferenceTrajectory:
         root_height: torch.Tensor | None = None,
         root_lin_vel_w: torch.Tensor | None = None,
     ):
-        self.horizon = joint_pos.shape[1]
+        self.horizon, self.dt = joint_pos.shape[1], dt
         self.full = root_height is not None
+        self.root_height, self.root_lin_vel_w = root_height, root_lin_vel_w
         self.joint_pos = joint_pos
         self.joint_vel = torch.gradient(joint_pos, spacing=dt, dim=1)[0]
         root_w = matrix_from_quat(root_quat_w)[:, None] @ rot6d_to_matrix(root_rot6d)

@@ -56,7 +56,9 @@ class SteeredDiffusionSource:
     """Reference source of ``SuperMimicController``: diffusion sampled from policy-chosen noise.
 
     ``mode`` is ``"sample"`` (training rollouts), ``"mean"`` (deterministic evaluation) or
-    ``"base"`` (``w ~ N(0, I)``, the unsteered diffusion policy). ``bf16`` runs the diffusion
+    ``"base"`` (``w ~ N(0, I)``, the unsteered diffusion policy); envs in ``base_envs`` (bool
+    over all envs) always take ``w ~ N(0, I)``, and with ``tie`` > 1 each run of ``tie``
+    consecutive replanned rows shares the noise of its first row. ``bf16`` runs the diffusion
     (DINOv3 + DiT, trained in bf16) under autocast, ~3x faster than fp32; the noise policy stays fp32. Every call records the
     observation tokens, the noise and its log-probability of the replanned rows (unless
     ``record`` is off, as when only running the policy).
@@ -66,6 +68,8 @@ class SteeredDiffusionSource:
                  bf16: bool = False):  # fmt: skip
         self.policy, self.noise_policy, self.mode, self.record = diffusion, noise_policy, mode, record
         self.bf16 = bf16
+        self.base_envs: torch.Tensor | None = None
+        self.tie = 1
         self.execute_steps, self.obs_horizon = diffusion.execute_steps, diffusion.obs_horizon
         self.horizon = diffusion.horizon
         self.records: list[dict[str, torch.Tensor]] = []
@@ -82,12 +86,21 @@ class SteeredDiffusionSource:
             w = mean
         else:
             w = torch.randn_like(mean)
+        if self.base_envs is not None:
+            w = torch.where(self.base_envs[rows][:, None], torch.randn_like(mean), w)
+        if self.tie > 1:
+            w = w[:: self.tie].repeat_interleave(self.tie, dim=0)
         if self.record:
             self.records.append({
                 "rows": rows.clone(), "cond": cond.to(torch.bfloat16), "noise": w,
                 "log_prob": NoisePolicy.log_prob(w, mean, log_std),
             })  # fmt: skip
+        return self.decode(cond, w)
+
+    @torch.no_grad()
+    def decode(self, cond: torch.Tensor, w: torch.Tensor):
+        """Reference ``(joint_pos, gripper opening, root rot6d)`` of observation tokens and noise."""
         with torch.autocast("cuda", torch.bfloat16, enabled=self.bf16):
-            pred = diffusion.sample(cond, w.view(-1, *self.noise_policy.noise_shape))
+            pred = self.policy.sample(cond, w.view(-1, *self.noise_policy.noise_shape))
         keys = ("body_action_pred", "gripper_width_pred", "root_rotation_pred")
         return tuple(pred[k].float() for k in keys)

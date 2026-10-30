@@ -108,10 +108,11 @@ and writes head-camera and overview videos of env 0 to `logs/pipeline/`.
 DDIM initial noise (DSRL): a Gaussian `NoisePolicy` on the diffusion's observation tokens picks the
 32 × 37 noise of every replan; it starts at N(0, I), i.e. the base policy. Diffusion, DINOv3 and the
 tracker stay frozen. GRPO: each group of envs restarts from one recorded grasp start, the episodic
-return (in box +1, lifted +0.2, +0.5 × the share of the can's distance to the placement goal it
-covered, fall −0.5, can dropped −0.2) is normalized within the group, and
-PPO-clip updates the noise policy with a KL term to N(0, I). Grasp starts of the diffusion's 12
-validation episodes are held out for the deterministic (mean noise) evaluation.
+return (`task.py`: 10 once the can rests released and upright in the box for 0.2 s, else
+exp(−d / 0.1 m) of the final can-goal distance, 0 after a fall or a dropped can) is normalized
+within the group, and PPO-clip updates the noise policy with a KL term to N(0, I) (`rl/grpo.py`).
+Grasp starts of the diffusion's 12 validation episodes are held out for the deterministic (mean
+noise) evaluation.
 
 ```bash
 # 8 GPUs; extra arguments go to can_pnp.scripts.train_dsrl (see its Args)
@@ -135,6 +136,33 @@ Live curves: mirror the runs into TensorBoard on the training host and forward t
 ssh -N -L 16007:127.0.0.1:6007 remote-26   # on the workstation, then open http://localhost:16007
 ```
 
+## v3: imagined post-training with an object world model
+
+`scripts/train_v3.py` trains the same noise policy mostly without rendering or physics. The frozen
+S0 side becomes a model (`body/`): SuperMimic's body world model f_ω (the `wm` weights of the tracker
+checkpoint, imported from `../supermimic-reproduced`) driven by the tracker through a reference
+(Φ, `body/imagine.py`) and the gripper / head-camera FK of its states (φ, `body/kinematics.py`).
+An object world model (`object_wm/model.py`) rolls the can over a chunk from the right gripper's
+motion and commanded opening; the imagined chunk return is the change of the task potential of
+`task.py` over the whole 32-frame reference (`rl/imagine.py`). Each cycle: one simulated rollout
+(`sim/collect.py`, 25 % of the envs on N(0, I) noise, failures kept) into a recency-weighted buffer
+(`object_wm/buffer.py`); object-WM steps on windows conditioned on simulated or Φ gripper poses
+(labels always simulated); a ranking check (identical sim states, candidates executed in sim vs
+imagined, Kendall τ) that halves / doubles the imagined updates per sim rollout; GRPO updates on
+recorded decisions × imagined candidates.
+
+```bash
+TRACKER=../checkpoints/supermimic_0100000.pt \
+DIFFUSION=../../UMI-Diffusion/Humanoid-Diffusion/outputs/<run>/best.pt \
+OUTPUT_DIR=logs/v3/run1 bash scripts/train_v3_8gpu.sh --init-noise-checkpoint logs/dsrl/<run>/best.pt
+# How well Φ predicts the robot here (vs the perfectly tracked reference):
+.venv/bin/python -m can_pnp.scripts.check_body_wm --tracker-checkpoint $TRACKER --diffusion-checkpoint $DIFFUSION
+```
+
+`metrics.jsonl` per cycle: `sim/*` (the current policy in the simulator) and `sim_base/*`,
+`wm_fresh/*` (object-WM error on the newest rollout before training on it, simulated vs Φ body),
+`wm/*`, `rank/tau` and the clone spread of the ranking groups, `imag/*`, `grpo/*` and timings.
+
 ## Not ported
 
 Stage logic, rewards, the SONIC decoder / residual composer, and the non-scene domain randomization
@@ -154,9 +182,14 @@ src/can_pnp/
   pipeline.py      reference sources and SuperMimicController
   odometry.py      reference root height / velocity from leg kinematics (full tracker)
   dsrl.py          DSRL noise policy and the steered diffusion source
+  task.py          task flags and episode potential (sim and imagination)
+  rl/              grpo.py (advantages, PPO-clip update, DDP), imagine.py (imagined chunk returns)
+  sim/             rollouts.py (GRPO episodes), collect.py (v3 data collection, ranking check)
+  body/            world_model.py (f_ω), imagine.py (Φ), kinematics.py (φ)
+  object_wm/       model.py (object world model, loss), buffer.py (recent rollouts)
   scripts/         check_scene.py (can-pnp-check), run_pipeline.py (can-pnp-run),
-                   train_dsrl.py (can-pnp-dsrl)
+                   train_dsrl.py (can-pnp-dsrl), train_v3.py, check_body_wm.py
   assets/          robots/g1_aloha (generated), scene meshes/texture, source/ (Isaac + adapter20 inputs)
-scripts/           build_assets.py, fetch_wheels.sh, train_dsrl_8gpu.sh
-tests/             scene geometry, layout sampling, goal features, tracker loading
+scripts/           build_assets.py, fetch_wheels.sh, train_dsrl_8gpu.sh, train_v3_8gpu.sh
+tests/             scene geometry, layout sampling, goal features, tracker loading, body WM, v3 pieces
 ```

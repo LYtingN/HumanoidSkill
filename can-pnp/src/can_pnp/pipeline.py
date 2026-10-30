@@ -134,6 +134,30 @@ class DiffusionSource:
         return pred["body_action_pred"], pred["gripper_width_pred"], pred["root_rotation_pred"]
 
 
+def reference_plan(
+    joint_pos: torch.Tensor,
+    rot6d: torch.Tensor,
+    root_quat_w: torch.Tensor,
+    default_joint_pos: torch.Tensor,
+    dt: float,
+    legs: LegKinematics | None = None,
+    measured_joint_pos: torch.Tensor | None = None,
+    measured_height: torch.Tensor | None = None,
+) -> ReferenceTrajectory:
+    """Tracker goals of a predicted reference from the robot state at the replan: root rotation
+    ``root_quat_w``; with ``legs`` (full-observation tracker) also the reference root height and
+    velocity by leg odometry, calibrated on the measured joints and root height (env frame)."""
+    height = lin_vel = None
+    if legs is not None:
+        root = matrix_from_quat(root_quat_w)
+        height, lin_vel = root_height_and_velocity(
+            legs, joint_pos, root[:, None] @ rot6d_to_matrix(rot6d), measured_joint_pos, root, measured_height, dt
+        )
+    return ReferenceTrajectory(
+        joint_pos, rot6d, root_quat_w, default_joint_pos, dt=dt, root_height=height, root_lin_vel_w=lin_vel
+    )
+
+
 class SuperMimicController:
     def __init__(
         self,
@@ -231,22 +255,17 @@ class SuperMimicController:
     def _replan(self, rows: torch.Tensor, images, states) -> None:
         joint_pos, grip, rot6d = self.source.predict(rows, images, states)
         data = self.robot.data
-        root_quat = data.root_link_quat_w[rows]
-        height = lin_vel = None
-        if self.legs is not None:
-            root = matrix_from_quat(root_quat)
-            height, lin_vel = root_height_and_velocity(
-                self.legs, joint_pos, root[:, None] @ rot6d_to_matrix(rot6d),
-                data.joint_pos[rows][:, self.body_ids], root,
-                (data.root_link_pos_w[:, 2] - self.env.scene.env_origins[:, 2])[rows], self.env.step_dt,
-            )  # fmt: skip
-        plan = ReferenceTrajectory(
-            joint_pos, rot6d, root_quat, self.default_joint_pos[rows],
-            dt=self.env.step_dt, root_height=height, root_lin_vel_w=lin_vel,
-        )
+        plan = reference_plan(
+            joint_pos, rot6d, data.root_link_quat_w[rows], self.default_joint_pos[rows], self.env.step_dt,
+            self.legs, data.joint_pos[rows][:, self.body_ids],
+            (data.root_link_pos_w[:, 2] - self.env.scene.env_origins[:, 2])[rows],
+        )  # fmt: skip
         if self.plan is None:
             self.plan, self.plan_gripper = plan, grip
             return
         for name in ("joint_pos", "joint_vel", "root_w", "gravity_b", "ang_vel_b", "frames"):
             getattr(self.plan, name)[rows] = getattr(plan, name)
+        if plan.full:
+            self.plan.root_height[rows] = plan.root_height
+            self.plan.root_lin_vel_w[rows] = plan.root_lin_vel_w
         self.plan_gripper[rows] = grip
