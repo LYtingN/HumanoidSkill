@@ -41,19 +41,19 @@ from typing import Literal
 import torch
 import torch.distributed as dist
 import tyro
-
-from hskill.executors.imagine import PhiStep
-from hskill.s0.kinematics import BodyKinematics
-from hskill.s0.body_world_model import DEFAULT_REPO, BodyWorldModel
-from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
+from can_pnp.task_spec import TaskTracker
 from hskill.data.buffer import EpisodeBuffer
+from hskill.executors.imagine import PhiStep
+from hskill.executors.imaginer import Imaginer
 from hskill.interaction.model import ObjectWMCfg, ObjectWorldModel, object_loss
 from hskill.learners.critic import ValueCritic, critic_features
 from hskill.learners.grpo import Distributed, group_advantages, update
-from hskill.executors.imaginer import Imaginer
+from hskill.s0.body_world_model import DEFAULT_REPO, BodyWorldModel
+from hskill.s0.kinematics import BodyKinematics
+from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
 from hskill.sim.collect import SimCollector
-from can_pnp.task_spec import TaskTracker
 from hskill.sim.rollouts import Rollouts
+
 from experiments._task_setup import rollout_dependencies
 
 

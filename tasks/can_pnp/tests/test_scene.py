@@ -4,7 +4,6 @@ import mujoco
 import numpy as np
 import pytest
 import torch
-
 from can_pnp.scene.config import CanPnpSceneCfg
 from can_pnp.scene.layout import _hsv_to_rgb, sample_layout
 
@@ -16,9 +15,8 @@ def scene_cfg():
 
 @pytest.fixture(scope="module")
 def model(scene_cfg):
-    from mjlab.scene import Scene
-
     from can_pnp.scene.env_cfg import CanPnpEnvCfgArgs, make_scene_cfg
+    from mjlab.scene import Scene
 
     return Scene(make_scene_cfg(CanPnpEnvCfgArgs(num_envs=1, scene=scene_cfg)), "cpu").compile()
 

@@ -1,7 +1,6 @@
 """Tracker observation history packing (CPU)."""
 
 import torch
-
 from hskill.executors.imagine import flatten_history, unflatten_history
 
 

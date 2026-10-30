@@ -22,9 +22,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
-
 from hskill.embodiment.g1_aloha import ASSETS_DIR as ROBOT_ASSETS
+from PIL import Image
 
 ASSETS = Path(__file__).resolve().parents[1] / "src" / "can_pnp" / "scene" / "assets"
 SOURCE = ASSETS / "source"

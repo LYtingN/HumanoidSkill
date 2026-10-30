@@ -18,12 +18,12 @@ from __future__ import annotations
 import math
 
 import mujoco
+from hskill.utils.colors import srgb
 from mjlab.entity import EntityCfg
 from mjlab.utils.spec_config import LightCfg, MaterialCfg, TextureCfg
 
 from can_pnp.scene import constants as C
 from can_pnp.scene.config import SceneGeometryCfg
-from hskill.utils.colors import srgb
 
 _BOX = mujoco.mjtGeom.mjGEOM_BOX
 _CYLINDER = mujoco.mjtGeom.mjGEOM_CYLINDER

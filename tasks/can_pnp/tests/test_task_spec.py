@@ -1,7 +1,6 @@
 """Task bookkeeping shared by simulated and imagined episodes."""
 
 import torch
-
 from can_pnp.scene.config import SceneGeometryCfg
 from can_pnp.task_spec import TaskCfg, TaskTracker
 

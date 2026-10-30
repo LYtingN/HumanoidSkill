@@ -38,10 +38,10 @@ from typing import Literal
 import torch
 import torch.distributed as dist
 import tyro
-
-from hskill.s1.noise_policy import NoisePolicy
 from hskill.learners.grpo import Distributed, group_advantages, summarize, update
+from hskill.s1.noise_policy import NoisePolicy
 from hskill.sim.rollouts import Rollouts
+
 from experiments._task_setup import rollout_dependencies
 
 

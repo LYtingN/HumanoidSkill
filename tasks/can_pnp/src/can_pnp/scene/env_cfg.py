@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import mujoco
+from hskill.embodiment import g1_aloha as C
+from hskill.embodiment.robot import robot_cfg
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as base_mdp
@@ -29,8 +31,6 @@ from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.viewer import ViewerConfig
 
-from hskill.embodiment import g1_aloha as C
-from hskill.embodiment.robot import robot_cfg
 from can_pnp.scene import entities, mdp
 from can_pnp.scene.config import CanPnpSceneCfg
 from can_pnp.scene.layout import reset_can_pnp_layout

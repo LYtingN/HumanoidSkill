@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from hskill.executors.imagine import unflatten_history
 
 FULL_TRACKER = Path(__file__).resolve().parents[4] / "supermimic_0100000.pt"
@@ -12,9 +11,9 @@ FULL_TRACKER = Path(__file__).resolve().parents[4] / "supermimic_0100000.pt"
 
 @pytest.mark.skipif(not torch.cuda.is_available() or not FULL_TRACKER.exists(), reason="needs CUDA and the tracker")
 def test_state_poses_and_observation_match_the_env():
-    from hskill.s0.kinematics import BodyKinematics
-    from hskill.s0.body_world_model import BodyWorldModel
     from can_pnp.scene.env_cfg import CanPnpEnvCfgArgs, make_env
+    from hskill.s0.body_world_model import BodyWorldModel
+    from hskill.s0.kinematics import BodyKinematics
 
     env = make_env(CanPnpEnvCfgArgs(num_envs=4, camera=False))
     env.reset()

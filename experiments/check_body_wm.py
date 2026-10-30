@@ -24,18 +24,17 @@ from typing import Literal
 
 import torch
 import tyro
-from mjlab.utils.lab_api.math import quat_apply_inverse
-
-from hskill.executors.imagine import PhiStep, imagine_body, reference_states
-from hskill.s0.kinematics import BodyKinematics
-from hskill.s0.body_world_model import DEFAULT_REPO, BodyWorldModel
 from can_pnp.scene.config import CanPnpSceneCfg, SceneGeometryCfg
-from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
 from can_pnp.scene.env_cfg import CanPnpEnvCfgArgs, make_env
 from can_pnp.starts import GraspStarts, apply_grasp_start
+from hskill.executors.imagine import PhiStep, imagine_body, reference_states
+from hskill.s0.body_world_model import DEFAULT_REPO, BodyWorldModel
 from hskill.s0.controller import SuperMimicController
-from hskill.s1.sources import load_diffusion_policy
+from hskill.s0.kinematics import BodyKinematics
 from hskill.s0.supermimic import load_tracking_policy
+from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
+from hskill.s1.sources import load_diffusion_policy
+from mjlab.utils.lab_api.math import quat_apply_inverse
 
 REPORT_STEPS = (1, 4, 8, 16, 24, 32)
 

@@ -1,7 +1,8 @@
 # 代码布局迁移验收
 
 迁移分支：`refactor/layout`。原始提交：`dcef958bb45dd4644ba16509b905909124f1b7d8`。
-按任务要求分六次提交，未 push，未操作远端服务器。
+布局迁移按任务要求分六次提交；随后另行提交 import 排序修复，并合并到 `main`。
+未 push，未操作远端训练任务。
 
 ## 实际迁移
 
@@ -78,14 +79,18 @@ DSRL 两次单 GPU 运行的 `train/*` 指标如下。同量级，但没有逐�
 | camera_pos_cm | 1.036694 | 1.069709 |
 | camera_rot_deg | 1.121023 | 1.132893 |
 
-完整误差表和 reference 对照保留在两次运行的 `body_wm/base_base.json`。
+完整误差表和 reference 对照曾记录于两次运行的 `body_wm/base_base.json`；
+这些临时文件按后续清理要求删除，本报告保留结果汇总。
 
 原有 91 个资产文件逐个校验，内容完全一致。对原 205 个函数和方法做 AST 比对：
 除 `Rollouts.__init__` 和 `Imaginer.__init__` 的依赖注入构造调整外，其余 203 个在
 统一 import 路径、回调引用和允许的类型标注调整后完全一致。
 `ruff check --select F821,F822,F823`、Python 语法解析和 `git diff --check` 通过。
 
-本地详细输出：`/tmp/hskill-reorg-baseline-gpu/`、`/tmp/hskill-reorg-post-gpu/`；
-各自 `summary.json` 记录完整命令、退出码和耗时。缓存设置为
+本地详细输出曾位于 `/tmp/hskill-reorg-baseline-gpu/`、`/tmp/hskill-reorg-post-gpu/`，
+各自 `summary.json` 曾记录完整命令、退出码和耗时。这些输出及临时检查脚本已按用户要求清理。
+后续修复了 22 处 import 排序警告；`ruff check --select I,F821,F822,F823`、
+21 项 GPU 测试及四个实验入口的 `--help` 检查均通过。
+验收时缓存设置为
 `TMPDIR=$HOME/.cache/hskill-reorg/tmp`、
 `TORCHINDUCTOR_CACHE_DIR=$HOME/.cache/hskill-reorg/torchinductor`。

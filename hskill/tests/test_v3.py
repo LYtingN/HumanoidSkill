@@ -1,12 +1,11 @@
 """v3 pieces that need no simulator: task bookkeeping, object WM prior, buffer sampling, ranking."""
 
 import torch
-from mjlab.utils.lab_api.math import quat_apply, quat_mul
-
 from hskill.data.buffer import EpisodeBuffer
 from hskill.interaction.model import ObjectWorldModel, object_loss, quat_exp, quat_log
 from hskill.learners.grpo import group_advantages
 from hskill.sim.collect import Episodes, kendall_tau
+from mjlab.utils.lab_api.math import quat_apply, quat_mul
 
 
 def test_object_wm_starts_as_a_rigid_grasp():

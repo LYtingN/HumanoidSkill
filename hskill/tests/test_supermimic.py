@@ -7,8 +7,6 @@ import mujoco
 import numpy as np
 import pytest
 import torch
-from mjlab.utils.lab_api.math import matrix_from_quat, quat_from_euler_xyz
-
 from hskill.embodiment import g1_aloha as C
 from hskill.s0.supermimic import (
     FULL_GOAL_DIM,
@@ -18,6 +16,7 @@ from hskill.s0.supermimic import (
     rot6d_to_matrix,
     torso_in_pelvis,
 )
+from mjlab.utils.lab_api.math import matrix_from_quat, quat_from_euler_xyz
 
 TRACKER = Path(__file__).resolve().parents[3] / (
     "logs/supermimic/1023_SM_Reproduced_LafanBones_DeployObs_Shards_2xA800_N4096_4278/ckpt_0268000.pt"

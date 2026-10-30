@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import torch
 from mjlab.utils.lab_api.math import matrix_from_quat
 
 from hskill.embodiment import g1_aloha as C
-import sys
-
 from hskill.s0.supermimic import matrix_to_rot6d
 
 

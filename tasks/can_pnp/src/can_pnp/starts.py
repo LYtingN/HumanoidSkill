@@ -17,10 +17,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
-
 from hskill.embodiment import g1_aloha as C
-from can_pnp.scene.layout import layout_term
 from hskill.s0.controller import gripper_q
+
+from can_pnp.scene.layout import layout_term
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
