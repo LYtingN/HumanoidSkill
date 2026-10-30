@@ -40,8 +40,9 @@ import torch.distributed as dist
 import tyro
 
 from hskill.s1.noise_policy import NoisePolicy
-from can_pnp.rl.grpo import Distributed, group_advantages, summarize, update
-from can_pnp.sim.rollouts import Rollouts
+from hskill.learners.grpo import Distributed, group_advantages, summarize, update
+from hskill.sim.rollouts import Rollouts
+from experiments._task_setup import rollout_dependencies
 
 
 @dataclass
@@ -94,7 +95,7 @@ def main(args: Args | None = None) -> None:
     args = args or tyro.cli(Args)
     ddp = Distributed()
     torch.manual_seed(args.seed + 1000 * ddp.rank)
-    rollouts = Rollouts(args, ddp.device, ddp.rank)
+    rollouts = Rollouts(args, ddp.device, ddp.rank, **rollout_dependencies(args))
     diffusion = rollouts.diffusion
     noise_policy = NoisePolicy(diffusion.n_tokens, diffusion.n_emb, diffusion.horizon, diffusion.action_dim,
                                hidden=args.hidden, init_log_std=args.init_log_std).to(ddp.device)  # fmt: skip

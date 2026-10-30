@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import torch
 
-from can_pnp.sim.collect import Episodes
+from hskill.data.episodes import Episodes
 
 TIME_MAJOR = ("obj", "grip", "command", "held", "mask")  # (time, sample, ...) window fields
 

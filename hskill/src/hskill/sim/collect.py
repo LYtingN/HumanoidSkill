@@ -17,41 +17,15 @@ All positions are in the env frame (env origin subtracted).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 
 from hskill.embodiment import g1_aloha as C
-from can_pnp.body.imagine import PhiStep, unflatten_history
+from hskill.executors.imagine import PhiStep, unflatten_history
 from hskill.s0.kinematics import BodyKinematics
 from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
-from can_pnp.layout import layout_term
 from hskill.s0.controller import SuperMimicController, gripper_opening
-from can_pnp.sim.rollouts import Rollouts
-from can_pnp.task import TaskTracker
-
-
-@dataclass
-class Episodes:
-    """One collection rollout: T steps x N envs, D = T / 8 decisions, H-step Phi windows."""
-
-    grip: torch.Tensor  # (T + 1, N, 7) right gripper base pose
-    command: torch.Tensor  # (T, N) commanded right opening of each step
-    obj: torch.Tensor  # (T + 1, N, 14) can pose / velocities, right finger opening
-    held: torch.Tensor  # (T + 1, N) bool, both right fingers touch the can
-    alive: torch.Tensor  # (T + 1, N) bool, the state belongs to the episode
-    phi_grip: torch.Tensor  # (D, H + 1, N, 7) Phi's gripper poses of the window from decision d
-    cond: torch.Tensor  # (D, N, tokens, emb) bf16 diffusion observation tokens
-    s0: torch.Tensor  # (D, N, 71) robot state at the decision
-    obs0: torch.Tensor  # (D, N, 930) tracker observation at the decision
-    decision_alive: torch.Tensor  # (D, N) bool
-    xi: torch.Tensor  # (N, 33)
-    box: torch.Tensor  # (N, 3) box centre
-    table: torch.Tensor  # (N, 3) table-top centre
-    goal: torch.Tensor  # (N, 3) placement goal
-    final_potential: torch.Tensor  # (N,) the episode's return (task potential at its end)
-    base: torch.Tensor  # (N,) bool, the env ran on N(0, I) noise
-    execute_steps: int = 8
+from hskill.sim.rollouts import Rollouts
+from hskill.data.episodes import Episodes
 
 
 def kendall_tau(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -93,7 +67,7 @@ class SimCollector:
 
     def context(self) -> dict[str, torch.Tensor]:
         env, geo = self.env, self.rollouts.geo
-        term = layout_term(env)
+        term = self.rollouts.layout_term(env)
         origin = env.scene.env_origins
         table = torch.stack([
             term.layout["table_front_x"] + geo.table_size[0] / 2, term.layout["table_center_y"],
@@ -105,10 +79,10 @@ class SimCollector:
         """The goal the tracker got at the step just taken (``SuperMimicController.act``)."""
         return controller.plan.goal(controller.step_in_chunk - 1, self.robot.data.body_link_quat_w[:, self.torso])
 
-    def _task(self) -> TaskTracker:
+    def _task(self):
         ctx = self.context()
         zeros = torch.zeros(self.env.num_envs, device=self.device)
-        return TaskTracker(self.rollouts.task, self.rollouts.geo, ctx["box"], ctx["goal"], zeros,
+        return self.rollouts.task_tracker(self.rollouts.task, self.rollouts.geo, ctx["box"], ctx["goal"], zeros,
                            self.object_state()[:, :3], self.env.step_dt)  # fmt: skip
 
     # ------------------------------------------------------------------ collection

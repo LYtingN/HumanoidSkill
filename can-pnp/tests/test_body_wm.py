@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from can_pnp.body.imagine import flatten_history, unflatten_history
+from hskill.executors.imagine import flatten_history, unflatten_history
 
 FULL_TRACKER = Path(__file__).resolve().parents[3] / "supermimic_0100000.pt"
 

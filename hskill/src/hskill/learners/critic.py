@@ -2,7 +2,7 @@
 
 The imagined objective of one 32-frame chunk alone is greedy (holding the can still always pays
 in the short run, placing it pays beyond the chunk). The critic predicts how much the task
-potential (``can_pnp.task``: done 10 > failed 0 > exp(-d / 0.1)) still changes until the episode
+potential (task tracker: done 10 > failed 0 > exp(-d / 0.1)) still changes until the episode
 ends, ``final potential - potential now``: the sum of the episode's remaining chunk returns, so
 the reward stays that potential. A candidate is then worth ``success_reward`` if it completes the
 task inside the chunk, 0 if it drops the can, else the chunk-end potential plus the critic's

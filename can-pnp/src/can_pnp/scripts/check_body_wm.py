@@ -26,7 +26,7 @@ import torch
 import tyro
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
-from can_pnp.body.imagine import PhiStep, imagine_body, reference_states
+from hskill.executors.imagine import PhiStep, imagine_body, reference_states
 from hskill.s0.kinematics import BodyKinematics
 from hskill.s0.body_world_model import DEFAULT_REPO, BodyWorldModel
 from can_pnp.config import CanPnpSceneCfg, SceneGeometryCfg

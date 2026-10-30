@@ -1,58 +1,38 @@
 """Batched grasp-start episodes of the steered diffusion policy in the simulator.
 
 ``args`` is any object with the fields of ``train_dsrl.Args`` used here (env / policy loading,
-``episode_s``, the :class:`can_pnp.task.TaskCfg` fields).
+``episode_s``, the task configuration fields).
 """
 
 from __future__ import annotations
 
-import dataclasses
-
 import torch
 from mjlab.utils.nan_guard import NanGuard
 
-from can_pnp.config import CanPnpSceneCfg, SceneGeometryCfg
 from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
-from can_pnp.env_cfg import CanPnpEnvCfgArgs, make_env
-from can_pnp.grasp_start import GraspStarts, apply_grasp_start
-from can_pnp.layout import layout_term
 from hskill.s0.controller import SuperMimicController
 from hskill.s1.sources import load_diffusion_policy
 from hskill.s0.supermimic import load_tracking_policy
-from can_pnp.task import TaskCfg, TaskTracker
 
 # Held-out episodes of the diffusion policy's training split (dataset_report.json, seed 42).
 VAL_EPISODES = (3, 46, 50, 54, 79, 120, 135, 169, 171, 204, 221, 245)
 
 
-def task_cfg(args) -> TaskCfg:
-    return TaskCfg(**{f.name: getattr(args, f.name) for f in dataclasses.fields(TaskCfg) if hasattr(args, f.name)})
-
-
 class Rollouts:
     """Env, frozen policies and grasp starts; :meth:`run` rolls one GRPO batch."""
 
-    def __init__(self, args, device: str, rank: int = 0, num_envs: int | None = None):
+    def __init__(self, args, device: str, rank: int = 0, num_envs: int | None = None, *,
+                 env_factory, starts_factory, task_cfg, layout_term, apply_grasp_start, task_tracker):
         self.args, self.device = args, device
+        self.layout_term, self.apply_grasp_start, self.task_tracker = layout_term, apply_grasp_start, task_tracker
         n = num_envs or args.groups * args.group_size
-        self.env = make_env(
-            CanPnpEnvCfgArgs(
-                # Episodes are timed here, not by the env: its time-out would reset envs mid-rollout.
-                num_envs=n, randomize=False, camera=True, rgb_backend=args.rgb_backend, episode_length_s=1e6,
-                seed=args.seed + rank,
-                scene=CanPnpSceneCfg(
-                    geometry=SceneGeometryCfg(can_mass=args.can_mass),
-                    camera=dataclasses.replace(CanPnpSceneCfg().camera, width=args.render_size[0], height=args.render_size[1]),
-                ),
-            ),
-            device=self.device,
-        )  # fmt: skip
+        self.env = env_factory(n, args.seed + rank, self.device)
         self.diffusion, _ = load_diffusion_policy(args.diffusion_checkpoint, args.diffusion_repo, self.device)
         self.diffusion.requires_grad_(False)
         if args.compile:
             self.diffusion.compile_for_training()
         self.tracker = load_tracking_policy(args.tracker_checkpoint, device=self.device)
-        self.starts = GraspStarts(phase=args.grasp_phase)
+        self.starts = starts_factory(phase=args.grasp_phase)
         val = set(VAL_EPISODES)
         self.train_rows = [i for i, e in enumerate(self.starts.episode_ids) if e not in val]
         self.val_rows = [i for i, e in enumerate(self.starts.episode_ids) if e in val]
@@ -78,13 +58,13 @@ class Rollouts:
         stale = NanGuard.detect_nans(env.sim.data)
         if bool(stale.any()):
             env.reset(env_ids=stale.nonzero().flatten())
-        apply_grasp_start(env, torch.arange(env.num_envs, device=self.device), self.starts, rows)
+        self.apply_grasp_start(env, torch.arange(env.num_envs, device=self.device), self.starts, rows)
         return env.obs_buf
 
-    def tracker_for(self) -> TaskTracker:
+    def tracker_for(self):
         env = self.env
-        term = layout_term(env)
-        return TaskTracker(self.task, self.geo, term.box_center_w, term.goal_pos_w, env.scene.env_origins[:, 2],
+        term = self.layout_term(env)
+        return self.task_tracker(self.task, self.geo, term.box_center_w, term.goal_pos_w, env.scene.env_origins[:, 2],
                            env.scene["can"].data.root_link_pos_w, env.step_dt)  # fmt: skip
 
     def failures(self, alive: torch.Tensor, terminated: torch.Tensor) -> tuple[torch.Tensor, ...]:

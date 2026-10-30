@@ -4,10 +4,10 @@ import torch
 from mjlab.utils.lab_api.math import quat_apply, quat_mul
 
 from can_pnp.config import SceneGeometryCfg
-from can_pnp.object_wm.buffer import EpisodeBuffer
-from can_pnp.object_wm.model import ObjectWorldModel, object_loss, quat_exp, quat_log
-from can_pnp.rl.grpo import group_advantages
-from can_pnp.sim.collect import Episodes, kendall_tau
+from hskill.data.buffer import EpisodeBuffer
+from hskill.interaction.model import ObjectWorldModel, object_loss, quat_exp, quat_log
+from hskill.learners.grpo import group_advantages
+from hskill.sim.collect import Episodes, kendall_tau
 from can_pnp.task import TaskCfg, TaskTracker
 
 
@@ -94,7 +94,7 @@ def test_buffer_windows_follow_the_episode():
 
 
 def test_value_critic_starts_greedy():
-    from can_pnp.rl.critic import FEAT_DIM, ValueCritic
+    from hskill.learners.critic import FEAT_DIM, ValueCritic
 
     v = ValueCritic(hidden=(16,))(100 * torch.randn(50, FEAT_DIM))
     assert v.shape == (50,) and (v == 0).all()  # no remainder yet: the greedy chunk return

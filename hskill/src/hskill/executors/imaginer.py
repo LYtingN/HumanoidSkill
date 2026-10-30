@@ -4,9 +4,9 @@ From a recorded decision (observation tokens, robot state, tracker observation, 
 layout) each noise is decoded by the frozen DiT into a reference, Phi (tracker + body world
 model) executes the whole reference (``horizon`` frames), phi gives the right gripper poses, the
 object world model rolls the can on them and the commanded openings, and the task tracker of the
-simulator (``can_pnp.task``) scores the imagined can: the chunk return is the change of the
+simulator (the supplied task tracker) scores the imagined can: the chunk return is the change of the
 episode potential over the chunk (done > dropped (can below the drop height) > distance). With a
-critic (``can_pnp.rl.critic``) the chunk-end potential gets the critic's remainder of the
+critic (``hskill.learners.critic``) the chunk-end potential gets the critic's remainder of the
 episode added, unless the task ended inside the chunk. Body falls are not scored: Phi's
 termination probability is only reported.
 """
@@ -16,24 +16,23 @@ from __future__ import annotations
 import torch
 
 from hskill.embodiment import g1_aloha as C
-from can_pnp.body.imagine import PhiStep, imagine_body
+from hskill.executors.imagine import PhiStep, imagine_body
 from hskill.s0.kinematics import BodyKinematics
-from can_pnp.config import SceneGeometryCfg
 from hskill.s1.noise_policy import SteeredDiffusionSource
-from can_pnp.object_wm.model import ObjectWorldModel
+from hskill.interaction.model import ObjectWorldModel
 from hskill.s0.odometry import LegKinematics
 from hskill.s0.controller import reference_plan
-from can_pnp.rl.critic import ValueCritic, critic_features
-from can_pnp.task import TaskCfg, TaskTracker
+from hskill.learners.critic import ValueCritic, critic_features
 
 
 class Imaginer:
     def __init__(self, source: SteeredDiffusionSource, phi: PhiStep, kin: BodyKinematics,
-                 object_wm: ObjectWorldModel, task: TaskCfg, geo: SceneGeometryCfg, horizon: int = 32,
-                 batch: int = 1024, critic: ValueCritic | None = None):  # fmt: skip
+                 object_wm: ObjectWorldModel, task, geo, horizon: int = 32,
+                 batch: int = 1024, critic: ValueCritic | None = None, *, task_tracker):  # fmt: skip
         self.source, self.phi, self.body, self.kin, self.critic = source, phi, phi.body, kin, critic
         self.object_wm, self.task, self.geo = object_wm, task, geo
         self.horizon, self.batch = horizon, batch
+        self.task_tracker = task_tracker
         env = self.body.env
         self.legs = LegKinematics(env.sim.mj_model, C.BODY_JOINT_NAMES, env.device, prefix="robot/")
         self.dt = env.step_dt
@@ -60,7 +59,7 @@ class Imaginer:
         command = grip[:, :H, 1].T  # (H, B) right opening, straight from the reference
         objs, _ = self.object_wm.rollout(start["obj0"], gripper, command, start["box"], start["table"])
         zeros = torch.zeros(n, device=s0.device)
-        tracker = TaskTracker(task, self.geo, start["box"], start["goal"], zeros, start["obj0"][:, :3], self.dt)
+        tracker = self.task_tracker(task, self.geo, start["box"], start["goal"], zeros, start["obj0"][:, :3], self.dt)
         alive = torch.ones(n, dtype=torch.bool, device=s0.device)
         dropped = torch.zeros_like(alive)
         for k in range(1, H + 1):

@@ -16,12 +16,12 @@ noise policy (``hskill.s1.noise_policy.NoisePolicy``) and the object world model
    falls more than ``rollback_margin`` below the best one restores that policy;
 2. object WM: ``wm_steps`` steps on 32-step windows, conditioned on simulated or (for
    ``phi_fraction`` of them) Phi's gripper poses, labels always the simulated can; critic
-   (``can_pnp.rl.critic``): ``critic_steps`` steps on the episode returns of recorded decisions;
+   (``hskill.learners.critic``): ``critic_steps`` steps on the episode returns of recorded decisions;
 3. ranking check (every ``rank_every`` cycles): candidates from identical sim states executed in
    sim vs imagined (``rank/tau``); a low tau halves the imagined iterations per sim rollout
    (more sim), a high tau doubles them, within [``imag_iters_min``, ``imag_iters_max``];
 4. imagination: up to ``imag_iters`` GRPO updates, each on ``imag_starts`` recorded decisions x
-   ``imag_group`` noises scored by ``can_pnp.rl.imagine.Imaginer`` (chunk returns of the sim task
+   ``imag_group`` noises scored by ``hskill.executors.imaginer.Imaginer`` (chunk returns of the sim task
    potential, see ``can_pnp.task``, completed by the critic's value of the chunk end), each
    stopped at ``imag_target_kl``, and all once the policy moved ``cycle_kl`` from the cycle's
    start (the simulator has the last word).
@@ -42,17 +42,19 @@ import torch
 import torch.distributed as dist
 import tyro
 
-from can_pnp.body.imagine import PhiStep
+from hskill.executors.imagine import PhiStep
 from hskill.s0.kinematics import BodyKinematics
 from hskill.s0.body_world_model import DEFAULT_REPO, BodyWorldModel
 from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
-from can_pnp.object_wm.buffer import EpisodeBuffer
-from can_pnp.object_wm.model import ObjectWMCfg, ObjectWorldModel, object_loss
-from can_pnp.rl.critic import ValueCritic, critic_features
-from can_pnp.rl.grpo import Distributed, group_advantages, update
-from can_pnp.rl.imagine import Imaginer
-from can_pnp.sim.collect import SimCollector
-from can_pnp.sim.rollouts import Rollouts
+from hskill.data.buffer import EpisodeBuffer
+from hskill.interaction.model import ObjectWMCfg, ObjectWorldModel, object_loss
+from hskill.learners.critic import ValueCritic, critic_features
+from hskill.learners.grpo import Distributed, group_advantages, update
+from hskill.executors.imaginer import Imaginer
+from hskill.sim.collect import SimCollector
+from can_pnp.task import TaskTracker
+from hskill.sim.rollouts import Rollouts
+from experiments._task_setup import rollout_dependencies
 
 
 @dataclass
@@ -166,7 +168,7 @@ def main(args: Args | None = None) -> None:
     ddp = Distributed()
     device = ddp.device
     torch.manual_seed(args.seed + 1000 * ddp.rank)
-    rollouts = Rollouts(args, device, ddp.rank, num_envs=args.num_envs)
+    rollouts = Rollouts(args, device, ddp.rank, num_envs=args.num_envs, **rollout_dependencies(args))
     env, diffusion = rollouts.env, rollouts.diffusion
     body = BodyWorldModel(env, args.tracker_checkpoint, args.supermimic_repo)
     kin = BodyKinematics(env, body, compile=args.compile)
@@ -184,7 +186,7 @@ def main(args: Args | None = None) -> None:
     use_critic = args.critic_steps > 0
     decoder = SteeredDiffusionSource(diffusion, noise_policy, bf16=args.bf16)
     imaginer = Imaginer(decoder, phi, kin, object_wm, rollouts.task, rollouts.geo, args.horizon, args.imag_batch,
-                        critic if use_critic else None)  # fmt: skip
+                        critic if use_critic else None, task_tracker=TaskTracker)  # fmt: skip
     imag_cfg = dataclasses.replace(args, target_kl=args.imag_target_kl)
     buffer = EpisodeBuffer(args.buffer_rollouts, args.buffer_decay, args.horizon)
     start, imag_iters = 0, args.imag_iters
