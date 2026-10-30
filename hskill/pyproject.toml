@@ -1,0 +1,19 @@
+[project]
+name = "hskill"
+version = "0.1.0"
+description = "Task-independent humanoid control and learning components"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "mjlab",
+  "torch>=2.14.0",
+  "mujoco~=3.16.0",
+  "numpy",
+  "pyarrow",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hskill"]

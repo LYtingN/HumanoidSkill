@@ -8,9 +8,14 @@ resolution-markers = [
 ]
 
 [manifest]
+members = [
+    "can-pnp",
+    "hskill",
+    "humanoid-skill",
+]
 overrides = [
     { name = "warp-lang", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = ">=1.15.0" },
-    { name = "warp-lang", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==1.18.0+cu12", index = "file:///home/eason_er/nyx/Humanoid_Posttraining/humanoid_skill/can-pnp/wheels" },
+    { name = "warp-lang", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==1.18.0+cu12", index = "file:///home/eason_er/nyx/Humanoid_Posttraining/humanoid_skill/wheels" },
 ]
 
 [[package]]
@@ -94,59 +99,28 @@ wheels = [
 [[package]]
 name = "can-pnp"
 version = "0.1.0"
-source = { editable = "." }
+source = { editable = "tasks/can_pnp" }
 dependencies = [
+    { name = "hskill" },
     { name = "mjlab" },
     { name = "mujoco" },
-    { name = "mujoco-warp" },
     { name = "numpy" },
     { name = "pillow" },
-    { name = "pyarrow" },
     { name = "torch", version = "2.14.1", source = { registry = "https://mirrors.aliyun.com/pypi/simple" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.14.1+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform != 'darwin'" },
     { name = "tyro" },
-    { name = "warp-lang", version = "1.18.0", source = { registry = "https://mirrors.aliyun.com/pypi/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
-    { name = "warp-lang", version = "1.18.0+cu12", source = { registry = "wheels" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-]
-
-[package.optional-dependencies]
-diffusion = [
-    { name = "diffusers" },
-    { name = "timm" },
-    { name = "torchvision", version = "0.29.1", source = { registry = "https://mirrors.aliyun.com/pypi/simple" }, marker = "sys_platform == 'darwin'" },
-    { name = "torchvision", version = "0.29.1+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform != 'darwin'" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "diffusers", marker = "extra == 'diffusion'", specifier = ">=0.30,<1" },
+    { name = "hskill", editable = "hskill" },
     { name = "mjlab", git = "https://github.com/mujocolab/mjlab?rev=8bb2bc9e187797689ec82c78c35019afd2fd0376" },
     { name = "mujoco", specifier = "~=3.16.0" },
-    { name = "mujoco-warp", specifier = "~=3.16.0" },
     { name = "numpy" },
     { name = "pillow" },
-    { name = "pyarrow" },
-    { name = "timm", marker = "extra == 'diffusion'", specifier = ">=1.0.20,<2" },
     { name = "torch", marker = "sys_platform != 'darwin'", specifier = ">=2.14.0", index = "https://download.pytorch.org/whl/cu126" },
     { name = "torch", marker = "sys_platform == 'darwin'", specifier = ">=2.14.0" },
-    { name = "torchvision", marker = "sys_platform == 'darwin' and extra == 'diffusion'" },
-    { name = "torchvision", marker = "sys_platform != 'darwin' and extra == 'diffusion'", index = "https://download.pytorch.org/whl/cu126" },
     { name = "tyro", specifier = ">=1.0.1" },
-    { name = "warp-lang", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = ">=1.15.0" },
-    { name = "warp-lang", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==1.18.0+cu12", index = "file:///home/eason_er/nyx/Humanoid_Posttraining/humanoid_skill/can-pnp/wheels" },
-]
-provides-extras = ["diffusion"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "ruff", specifier = ">=0.8" },
 ]
 
 [[package]]
@@ -640,6 +614,29 @@ wheels = [
 ]
 
 [[package]]
+name = "hskill"
+version = "0.1.0"
+source = { editable = "hskill" }
+dependencies = [
+    { name = "mjlab" },
+    { name = "mujoco" },
+    { name = "numpy" },
+    { name = "pyarrow" },
+    { name = "torch", version = "2.14.1", source = { registry = "https://mirrors.aliyun.com/pypi/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.14.1+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform != 'darwin'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mjlab", git = "https://github.com/mujocolab/mjlab?rev=8bb2bc9e187797689ec82c78c35019afd2fd0376" },
+    { name = "mujoco", specifier = "~=3.16.0" },
+    { name = "numpy" },
+    { name = "pyarrow" },
+    { name = "torch", marker = "sys_platform != 'darwin'", specifier = ">=2.14.0", index = "https://download.pytorch.org/whl/cu126" },
+    { name = "torch", marker = "sys_platform == 'darwin'", specifier = ">=2.14.0" },
+]
+
+[[package]]
 name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
@@ -724,6 +721,68 @@ dependencies = [
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/46/dd/585639d95f6a987c0bdfb9045f050f4ad67240775644ba7a4fdc5aca3a3b/huggingface_hub-2.3.0.tar.gz", hash = "sha256:0b783b37f200f1d25bef2344a997c7d410f4437fbe9d8fd965f958e75cec7aef" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/c7/89/5f6ef1162d0323f167b6baab04d1b4bd6a946161a8af6d86f622d9d79aa1/huggingface_hub-2.3.0-py3-none-any.whl", hash = "sha256:5da369600233568a126eb5578754935b2add9446b42d9e2fc0927d56840ac1a5" },
+]
+
+[[package]]
+name = "humanoid-skill"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "can-pnp" },
+    { name = "hskill" },
+    { name = "mjlab" },
+    { name = "mujoco" },
+    { name = "mujoco-warp" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "pyarrow" },
+    { name = "torch", version = "2.14.1", source = { registry = "https://mirrors.aliyun.com/pypi/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.14.1+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform != 'darwin'" },
+    { name = "tyro" },
+    { name = "warp-lang", version = "1.18.0", source = { registry = "https://mirrors.aliyun.com/pypi/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
+    { name = "warp-lang", version = "1.18.0+cu12", source = { registry = "wheels" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
+
+[package.optional-dependencies]
+diffusion = [
+    { name = "diffusers" },
+    { name = "timm" },
+    { name = "torchvision", version = "0.29.1", source = { registry = "https://mirrors.aliyun.com/pypi/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "torchvision", version = "0.29.1+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform != 'darwin'" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "can-pnp", editable = "tasks/can_pnp" },
+    { name = "diffusers", marker = "extra == 'diffusion'", specifier = ">=0.30,<1" },
+    { name = "hskill", editable = "hskill" },
+    { name = "mjlab", git = "https://github.com/mujocolab/mjlab?rev=8bb2bc9e187797689ec82c78c35019afd2fd0376" },
+    { name = "mujoco", specifier = "~=3.16.0" },
+    { name = "mujoco-warp", specifier = "~=3.16.0" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "pyarrow" },
+    { name = "timm", marker = "extra == 'diffusion'", specifier = ">=1.0.20,<2" },
+    { name = "torch", marker = "sys_platform != 'darwin'", specifier = ">=2.14.0", index = "https://download.pytorch.org/whl/cu126" },
+    { name = "torch", marker = "sys_platform == 'darwin'", specifier = ">=2.14.0" },
+    { name = "torchvision", marker = "sys_platform == 'darwin' and extra == 'diffusion'" },
+    { name = "torchvision", marker = "sys_platform != 'darwin' and extra == 'diffusion'", index = "https://download.pytorch.org/whl/cu126" },
+    { name = "tyro", specifier = ">=1.0.1" },
+    { name = "warp-lang", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = ">=1.15.0" },
+    { name = "warp-lang", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==1.18.0+cu12", index = "file:///home/eason_er/nyx/Humanoid_Posttraining/humanoid_skill/wheels" },
+]
+provides-extras = ["diffusion"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "ruff", specifier = ">=0.8" },
 ]
 
 [[package]]
