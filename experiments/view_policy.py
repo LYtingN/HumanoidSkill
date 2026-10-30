@@ -2,13 +2,13 @@
 
     # Closed loop: retrained diffusion policy (config/can_pnp_supermimic.yaml) -> SuperMimic.
     uv run --extra diffusion can-pnp-run --source diffusion \\
-        --diffusion-checkpoint <run>/best.pt --diffusion-repo ../../Diffusion/Humanoid-Diffusion \\
+        --diffusion-checkpoint <run>/best.pt --diffusion-repo ../Diffusion/Humanoid-Diffusion \\
         --tracker-checkpoint <supermimic>/ckpt_0268000.pt
 
     # The diffusion policy steered by a DSRL noise policy (can-pnp-dsrl checkpoint), from the
     # grasp starts it was trained on.
     uv run --extra diffusion can-pnp-run --source dsrl --noise-checkpoint <dsrl run>/last.pt \\
-        --diffusion-checkpoint <run>/best.pt --diffusion-repo ../../Diffusion/Humanoid-Diffusion \\
+        --diffusion-checkpoint <run>/best.pt --diffusion-repo ../Diffusion/Humanoid-Diffusion \\
         --tracker-checkpoint <supermimic>.pt --start grasp --can-mass 0.1 --no-randomize --viewer
 
     # Open-loop check of tracker + goal construction with recorded targets of one episode.
@@ -67,7 +67,7 @@ class Args:
     # dsrl source: the policy's mean noise (as evaluated in training), a sample of it, or N(0, I)
     # (the unsteered diffusion policy).
     noise_mode: Literal["mean", "sample", "base"] = "mean"
-    diffusion_repo: Path = Path("../../Diffusion/Humanoid-Diffusion")
+    diffusion_repo: Path = Path(__file__).resolve().parents[2] / "Diffusion" / "Humanoid-Diffusion"
     episode: Path | None = None  # dataset source: a LeRobot episode parquet
     num_envs: int = 4
     seconds: float = 20.0  # <= 0: no limit, run until the viewer is closed or Ctrl-C

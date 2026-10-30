@@ -3,7 +3,7 @@
 # patches the installed mjlab with the RGB-renderer interface of mjlab_hyperlux_plugin, installs
 # hyperlux 0.1.8 + the plugin into .venv and applies HyperLux's own OptiX source patch.
 #
-#   HYPERLUX_PLUGIN=<clone of github.com/lzyang2000/mjlab_hyperlux_plugin> bash scripts/setup_hyperlux.sh
+#   HYPERLUX_PLUGIN=<clone of github.com/lzyang2000/mjlab_hyperlux_plugin> bash tools/setup_hyperlux.sh
 #
 # Needs nvcc (CUDA_HOME), a C++ compiler and CMake; the first render compiles native code into
 # HYPERLUX_CACHE_DIR. `uv sync` reinstalls mjlab unpatched: rerun this script afterwards.
@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PLUGIN="${HYPERLUX_PLUGIN:-../../third_party/mjlab_hyperlux_plugin}"
+PLUGIN="${HYPERLUX_PLUGIN:-../third_party/mjlab_hyperlux_plugin}"
 PY=.venv/bin/python
 UV="${UV:-$(command -v uv || echo ~/.local/bin/uv)}"
 SITE=$("$PY" -c "import mjlab, os; print(os.path.dirname(os.path.dirname(mjlab.__file__)))")

@@ -6,7 +6,7 @@ import dataclasses
 
 from can_pnp.scene.config import CanPnpSceneCfg, SceneGeometryCfg
 from can_pnp.scene.env_cfg import CanPnpEnvCfgArgs, make_env
-from can_pnp.starts import GraspStarts, apply_grasp_start
+from can_pnp.starts import VAL_EPISODES, GraspStarts, apply_grasp_start
 from can_pnp.scene.layout import layout_term
 from can_pnp.task_spec import TaskCfg, TaskTracker
 
@@ -32,4 +32,5 @@ def rollout_dependencies(args):
         )  # fmt: skip
 
     return dict(env_factory=env_factory, starts_factory=GraspStarts, task_cfg=task_cfg,
-                layout_term=layout_term, apply_grasp_start=apply_grasp_start, task_tracker=TaskTracker)
+                layout_term=layout_term, apply_grasp_start=apply_grasp_start, task_tracker=TaskTracker,
+                val_episodes=VAL_EPISODES)

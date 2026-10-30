@@ -1,8 +1,8 @@
 """Extract the recorded states at the start of the reach / grasp of every collected episode.
 
-    python scripts/extract_grasp_starts.py \\
+    uv run python tasks/can_pnp/scripts/extract_grasp_starts.py \\
         /data/nas_ray/home/jessie.lyu/single_can_adapter20_recollect250_20261017/episodes \\
-        src/can_pnp/assets/grasp_starts.json
+        tasks/can_pnp/src/can_pnp/scene/assets/grasp_starts.json
 
 Reads each accepted attempt (``RTX_VIDEO_QA.json`` passed) of the MuJoCo collection: the
 physical trajectory (``trajectory.npz``), its layout (``trajectory.json``) and the joint

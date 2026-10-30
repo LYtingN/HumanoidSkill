@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 GRASP_STARTS = Path(__file__).parent / "scene" / "assets" / "grasp_starts.json"
 
+# Held-out episodes of the diffusion policy's training split (dataset_report.json, seed 42).
+VAL_EPISODES = (3, 46, 50, 54, 79, 120, 135, 169, 171, 204, 221, 245)
+
 
 class GraspStarts:
     def __init__(self, path: str | Path = GRASP_STARTS, phase: str = "CLOSE"):

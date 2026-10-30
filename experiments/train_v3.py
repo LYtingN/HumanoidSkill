@@ -1,13 +1,13 @@
 """S1-S0 v3: DSRL noise-policy GRPO mostly in imagination, with an object world model.
 
-    uv run --extra diffusion python -m can_pnp.scripts.train_v3 --tracker-checkpoint <supermimic>.pt \\
+    uv run --extra diffusion python -m experiments.train_v3 --tracker-checkpoint <supermimic>.pt \\
         --diffusion-checkpoint <Humanoid-Diffusion run>/best.pt --out-dir logs/v3/run1 \\
         [--init-noise-checkpoint logs/dsrl/<run>/best.pt]
     # eight GPUs: scripts/train_v3_8gpu.sh
 
 Frozen: DINOv3 + DiT (S1), the SuperMimic tracker and its body world model (S0). Trained: the
 noise policy (``hskill.s1.noise_policy.NoisePolicy``) and the object world model
-(``can_pnp.object_wm``). Every cycle (steps 1-2 only every ``collect_every`` cycles):
+(``hskill.interaction``). Every cycle (steps 1-2 only every ``collect_every`` cycles):
 
 1. sim: one rollout of grasp-start episodes (8-step replans, a ``base_fraction`` of the envs on
    N(0, I) noise, failures kept) into the recency-weighted buffer; its policy envs measure the
@@ -61,7 +61,7 @@ from experiments._task_setup import rollout_dependencies
 class Args:
     tracker_checkpoint: Path
     diffusion_checkpoint: Path
-    diffusion_repo: Path = Path("../../Diffusion/Humanoid-Diffusion")
+    diffusion_repo: Path = Path(__file__).resolve().parents[2] / "Diffusion" / "Humanoid-Diffusion"
     supermimic_repo: Path = DEFAULT_REPO
     out_dir: Path = Path("logs/v3/run")
     resume: Path | None = None  # train_v3 checkpoint

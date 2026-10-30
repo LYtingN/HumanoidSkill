@@ -14,7 +14,7 @@ diffusion policy (Humanoid-Diffusion, head camera + state)
 
 | Entity | Content |
 |---|---|
-| `robot` | mjlab G1 — the model, actuators and collision setup SuperMimic is trained on — with the rubber hands replaced by the ALOHA 2 grippers of the can_pnp robot (`assets/robots/g1_aloha`, built by `scripts/build_assets.py`); grippers kp 1800 / kd 20 / 35 N, mirror fingers coupled by equality |
+| `robot` | mjlab G1 — the model, actuators and collision setup SuperMimic is trained on — with the rubber hands replaced by the ALOHA 2 grippers of the can_pnp robot (`hskill/src/hskill/embodiment/assets/robots/g1_aloha`, built by `tasks/can_pnp/scripts/build_assets.py`); grippers kp 1800 / kd 20 / 35 N, mirror fingers coupled by equality |
 | `can` | target purple can, r 0.0275 m, h 0.105 m, 0.62 kg, on the table |
 | `shelf_can` | resident can in the box, randomized position and colors |
 | `table` | 1.2 × 0.6 m top at 0.74 m; moved by the layout |
@@ -27,11 +27,11 @@ per-world buffers 128 contacts / 600 constraint rows (mjlab's default `njmax = 6
 Can and floor contacts follow the MuJoCo scene the diffusion dataset was collected in (can condim 6,
 friction (1, 0.005, 0.0005), solref (0.01, 1); floor friction 1).
 
-Layout per reset (`layout.py`, port of `collection_sampling.py` / `reset.py` / `randomization.py`):
+Layout per reset (`can_pnp/scene/layout.py`, port of `collection_sampling.py` / `reset.py` / `randomization.py`):
 table fore-aft ±0.25 m and 0.3–0.6 m gap to the shelf, robot 0.5–1.5 m in front of the table with
 yaw ±45°, can inset 0.15–0.3 m and lateral ±0.15 m, resident can uniform in the box with HSV
 colors, placement goal in the free half of the box, box jitter ±(0.03, 0.02) m.
-`randomize=False` gives the nominal layout. Layout and goal: `can_pnp.layout.layout_term(env)`.
+`randomize=False` gives the nominal layout. Layout and goal: `can_pnp.scene.layout.layout_term(env)`.
 
 Checked against the collection scene: shelf / box / table geometry and the head camera pose match;
 the head-camera image of episode 0's initial state lines up with the dataset frame (can, table edge,
@@ -40,24 +40,24 @@ MuJoCo — which is a visual domain gap for the diffusion policy.
 
 ## Control pipeline
 
-- `supermimic.py` — loads the tracker checkpoint and builds its 646-dim goal from a reference:
+- `hskill/s0/supermimic.py` — loads the tracker checkpoint and builds its 646-dim goal from a reference:
   10 frames × `[q − q0, q̇, gravity in the ref root frame, ref root angular velocity]` + the 6D
   reference torso orientation in the robot torso frame. The layout was read off the checkpoint's
   scale vectors (`deploy_obs` drops horizontal velocity and height from the 68-dim frame). The
   anchor term is assumed to be mjlab's `motion_anchor_ori_b`. Full-observation trackers (goal 680,
   e.g. `supermimic_0100000.pt`) use the whole 68-dim frame — `[…, ref root linear velocity in its
   yaw frame, ref root height]` — and no anchor term.
-- `odometry.py` — the diffusion reference has no root translation; for the full tracker the root
+- `hskill/s0/odometry.py` — the diffusion reference has no root translation; for the full tracker the root
   height and velocity come from leg kinematics: the lower sole is the stance foot and does not
   slip, and the ground is calibrated on the measured robot at each replan.
-- `pipeline.py` — `SuperMimicController` with three reference sources:
+- `hskill/s0/controller.py` and `hskill/s1/sources.py` — `SuperMimicController` with three reference sources:
   - `DiffusionSource`: the diffusion policy trained with `Humanoid-Diffusion/config/can_pnp_supermimic.yaml`
     (targets: measured joints, gripper commands, root rotation relative to the prediction time).
     Its observation is built as recorded in the dataset: body joints, `wrist_yaw_link` poses in the
     pelvis frame, projected gravity, gripper openings in metres, head camera resized to 224².
   - `DatasetSource`: the same targets from a recorded episode, open loop.
   - `StandSource`: the default pose.
-- The `policy` observation group of `env_cfg.py` is SuperMimic's training group (930 dims); the
+- The `policy` observation group of `can_pnp/scene/env_cfg.py` is SuperMimic's training group (930 dims); the
   action is `[29 tracker actions (q0 + G1_ACTION_SCALE · a) | 2 gripper slide targets]`.
 
 Checks so far (tracker `ckpt_0268000.pt`): standing 5 s and replaying episode 0 (18 s: walk, turn,
@@ -69,9 +69,9 @@ starts of episodes 0–7, 14 s, 100 g can: 7/8 lifted, 0/8 in the box, 1 can dro
 ## Setup
 
 ```bash
-cd humanoid_skill/can-pnp
-bash scripts/fetch_wheels.sh            # warp-lang 1.18.0+cu12 into wheels/ (or copy wheels/ over)
-UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple uv sync --extra diffusion
+cd humanoid_skill
+bash tools/fetch_wheels.sh            # warp-lang 1.18.0+cu12 into wheels/ (or copy wheels/ over)
+UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple uv sync --all-extras
 ```
 
 - Drivers 550 / 570 support CUDA ≤ 12.8: torch comes from the cu126 index and warp from the CUDA 12
@@ -87,6 +87,8 @@ UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple uv sync --extra diffusio
 
 ## Run
 
+Run all commands below from the `humanoid_skill/` workspace root.
+
 ```bash
 MUJOCO_GL=egl uv run can-pnp-check --num-envs 8 --out-dir logs/scene_check   # scene + renders
 uv run pytest                                                                  # CPU tests
@@ -94,9 +96,9 @@ uv run pytest                                                                  #
 TRACKER=<supermimic run>/ckpt_0268000.pt
 uv run can-pnp-run --source stand   --tracker-checkpoint $TRACKER --seconds 5
 uv run can-pnp-run --source dataset --tracker-checkpoint $TRACKER \
-    --episode ../data/residual_rl/can_pnp/data/chunk-000/episode_000000.parquet --seconds 18
+    --episode data/residual_rl/can_pnp/data/chunk-000/episode_000000.parquet --seconds 18
 uv run --extra diffusion can-pnp-run --source diffusion --tracker-checkpoint $TRACKER \
-    --diffusion-checkpoint <Humanoid-Diffusion run>/best.pt --diffusion-repo ../../Diffusion/Humanoid-Diffusion
+    --diffusion-checkpoint <Humanoid-Diffusion run>/best.pt --diffusion-repo ../Diffusion/Humanoid-Diffusion
 ```
 
 `can-pnp-run` reports falls, joint / heading tracking error and (closed loop) can lifted / placed,
@@ -104,7 +106,7 @@ and writes head-camera and overview videos of env 0 to `logs/pipeline/`.
 
 ## DSRL + GRPO post-training
 
-`dsrl.py` / `scripts/train_dsrl.py` (`can-pnp-dsrl`) steer the frozen diffusion policy through its
+`hskill/s1/noise_policy.py` / `experiments/train_dsrl.py` (`can-pnp-dsrl`) steer the frozen diffusion policy through its
 DDIM initial noise (DSRL): a Gaussian `NoisePolicy` on the diffusion's observation tokens picks the
 32 × 37 noise of every replan; it starts at N(0, I), i.e. the base policy. Diffusion, DINOv3 and the
 tracker stay frozen. GRPO: each group of envs restarts from one recorded grasp start, the episodic
@@ -115,10 +117,10 @@ Grasp starts of the diffusion's 12 validation episodes are held out for the dete
 noise) evaluation.
 
 ```bash
-# 8 GPUs; extra arguments go to can_pnp.scripts.train_dsrl (see its Args)
-TRACKER=../checkpoints/supermimic_0100000.pt \
-DIFFUSION=../../UMI-Diffusion/Humanoid-Diffusion/outputs/<run>/best.pt \
-OUTPUT_DIR=logs/dsrl/run1 bash scripts/train_dsrl_8gpu.sh
+# 8 GPUs; extra arguments go to experiments.train_dsrl (see its Args)
+TRACKER=../supermimic_0100000.pt \
+DIFFUSION=../Diffusion/Humanoid-Diffusion/outputs/<run>/best.pt \
+OUTPUT_DIR=logs/dsrl/run1 bash experiments/launch/train_dsrl_8gpu.sh
 ```
 
 `metrics.jsonl` logs per iteration the train success / in-box / lift / fall / drop / physics-divergence
@@ -131,16 +133,16 @@ two control steps that feed the next replan.
 Live curves: mirror the runs into TensorBoard on the training host and forward the port.
 
 ```bash
-.venv/bin/python scripts/metrics_to_tensorboard.py logs/dsrl &
+.venv/bin/python tools/metrics_to_tensorboard.py logs/dsrl &
 .venv/bin/tensorboard --logdir logs/dsrl --port 6007 --host 127.0.0.1 &
 ssh -N -L 16007:127.0.0.1:6007 remote-26   # on the workstation, then open http://localhost:16007
 ```
 
 ## v3: imagined post-training with an object world model
 
-`scripts/train_v3.py` trains the same noise policy mostly without rendering or physics. The frozen
+`experiments/train_v3.py` trains the same noise policy mostly without rendering or physics. The frozen
 S0 side becomes a model (`body/`): SuperMimic's body world model f_ω (the `wm` weights of the tracker
-checkpoint, imported from `../supermimic-reproduced`) driven by the tracker through a reference
+checkpoint, imported from `supermimic-reproduced`) driven by the tracker through a reference
 (Φ, `body/imagine.py`) and the gripper / head-camera FK of its states (φ, `body/kinematics.py`).
 An object world model (`object_wm/model.py`) rolls the can over a chunk from the right gripper's
 motion and commanded opening; the imagined chunk return is the change of the task potential of
@@ -152,11 +154,11 @@ imagined, Kendall τ) that halves / doubles the imagined updates per sim rollout
 recorded decisions × imagined candidates.
 
 ```bash
-TRACKER=../checkpoints/supermimic_0100000.pt \
-DIFFUSION=../../UMI-Diffusion/Humanoid-Diffusion/outputs/<run>/best.pt \
-OUTPUT_DIR=logs/v3/run1 bash scripts/train_v3_8gpu.sh --init-noise-checkpoint logs/dsrl/<run>/best.pt
+TRACKER=../supermimic_0100000.pt \
+DIFFUSION=../Diffusion/Humanoid-Diffusion/outputs/<run>/best.pt \
+OUTPUT_DIR=logs/v3/run1 bash experiments/launch/train_v3_8gpu.sh --init-noise-checkpoint logs/dsrl/<run>/best.pt
 # How well Φ predicts the robot here (vs the perfectly tracked reference):
-.venv/bin/python -m can_pnp.scripts.check_body_wm --tracker-checkpoint $TRACKER --diffusion-checkpoint $DIFFUSION
+.venv/bin/python -m experiments.check_body_wm --tracker-checkpoint $TRACKER --diffusion-checkpoint $DIFFUSION
 ```
 
 `metrics.jsonl` per cycle: `sim/*` (the current policy in the simulator) and `sim_base/*`,
@@ -170,26 +172,9 @@ Stage logic, rewards, the SONIC decoder / residual composer, and the non-scene d
 
 ## Layout
 
-```
-src/can_pnp/
-  config.py        scene geometry, head camera and layout parameters
-  constants.py     joint order, deploy pose, gripper actuator and opening <-> joint mapping
-  entities.py      robot (mjlab G1 + ALOHA), cans, table, box, room; lights
-  layout.py        per-episode layout sampling + reset event
-  mdp.py           object/goal observations, fall and drop terminations
-  env_cfg.py       ManagerBasedRlEnvCfg (CanPnpEnvCfgArgs, make_env)
-  supermimic.py    tracker loading and goal features
-  pipeline.py      reference sources and SuperMimicController
-  odometry.py      reference root height / velocity from leg kinematics (full tracker)
-  dsrl.py          DSRL noise policy and the steered diffusion source
-  task.py          task flags and episode potential (sim and imagination)
-  rl/              grpo.py (advantages, PPO-clip update, DDP), imagine.py (imagined chunk returns)
-  sim/             rollouts.py (GRPO episodes), collect.py (v3 data collection, ranking check)
-  body/            world_model.py (f_ω), imagine.py (Φ), kinematics.py (φ)
-  object_wm/       model.py (object world model, loss), buffer.py (recent rollouts)
-  scripts/         check_scene.py (can-pnp-check), run_pipeline.py (can-pnp-run),
-                   train_dsrl.py (can-pnp-dsrl), train_v3.py, check_body_wm.py
-  assets/          robots/g1_aloha (generated), scene meshes/texture, source/ (Isaac + adapter20 inputs)
-scripts/           build_assets.py, fetch_wheels.sh, train_dsrl_8gpu.sh, train_v3_8gpu.sh
-tests/             scene geometry, layout sampling, goal features, tracker loading, body WM, v3 pieces
-```
+The scene, layout, environment configuration and assets are in `tasks/can_pnp/src/can_pnp/scene/`.
+`task_spec.py` scores the episode; `starts.py` reads the recorded grasp starts.
+Robot assets and construction are in `hskill/src/hskill/embodiment/`; tracking, reference
+sources, rollout execution and learning are in the other `hskill` subpackages.
+Runnable training, diagnostics and viewing entry points are in `experiments/`.
+See the [workspace README](../../README.md) for the complete structure and commands.

@@ -42,7 +42,7 @@ class CanPnpEnvCfgArgs:
     # Layout / resident / box randomization (Isaac Lab: domain_randomization.train_enabled).
     randomize: bool = True
     camera: bool = True
-    # Head-camera RGB renderer: MuJoCo Warp, or HyperLux (OptiX, scripts/setup_hyperlux.sh). HyperLux
+    # Head-camera RGB renderer: MuJoCo Warp, or HyperLux (OptiX, tools/setup_hyperlux.sh). HyperLux
     # takes geom colors from the compiled model, so per-env color randomization is not rendered.
     rgb_backend: Literal["mujoco_warp", "hyperlux"] = "mujoco_warp"
     # Dataset episodes run up to ~20 s (navigation + pick + place).
@@ -55,7 +55,7 @@ class CanPnpEnvCfgArgs:
     # cans resting peaks at ~40 contacts / ~170 constraint rows.
     nconmax: int | None = 128
     # Cancel the extra weight of the ALOHA gripper over the hand SuperMimic is trained with
-    # (entities._hand_gravcomp); without it the hand sags ~11 cm and cannot lift the can.
+    # (hskill.embodiment.robot._hand_gravcomp); without it the hand sags ~11 cm and cannot lift the can.
     hand_gravcomp: bool = True
     njmax: int | None = 600
     scene: CanPnpSceneCfg = field(default_factory=CanPnpSceneCfg)

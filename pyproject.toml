@@ -65,7 +65,7 @@ warp-lang = { index = "warp-cu12", marker = "sys_platform == 'linux' and platfor
 
 # PyPI is uv's default index; on slow links point it at a mirror for the sync, e.g.
 #   UV_DEFAULT_INDEX=https://mirrors.ustc.edu.cn/pypi/simple uv sync
-# Local flat index holding the CUDA 12 warp-lang build (scripts/fetch_wheels.sh).
+# Local flat index holding the CUDA 12 warp-lang build (tools/fetch_wheels.sh).
 [[tool.uv.index]]
 name = "warp-cu12"
 url = "wheels"

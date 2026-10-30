@@ -3,8 +3,8 @@
     # one GPU
     uv run --extra diffusion can-pnp-dsrl --tracker-checkpoint <supermimic>.pt \\
         --diffusion-checkpoint <Humanoid-Diffusion run>/best.pt --out-dir logs/dsrl/run1
-    # eight GPUs (scripts/train_dsrl_8gpu.sh)
-    torchrun --standalone --nproc-per-node 8 -m can_pnp.scripts.train_dsrl ...
+    # eight GPUs (experiments/launch/train_dsrl_8gpu.sh)
+    torchrun --master-addr 127.0.0.1 --master-port 29531 --nnodes 1 --nproc-per-node 8 -m experiments.train_dsrl ...
 
 Policy: :class:`hskill.s1.noise_policy.NoisePolicy` chooses the DDIM initial noise of the frozen diffusion
 policy at every replan (8 control steps); the SuperMimic tracker executes the reference.
@@ -49,7 +49,7 @@ from experiments._task_setup import rollout_dependencies
 class Args:
     tracker_checkpoint: Path
     diffusion_checkpoint: Path
-    diffusion_repo: Path = Path("../../Diffusion/Humanoid-Diffusion")
+    diffusion_repo: Path = Path(__file__).resolve().parents[2] / "Diffusion" / "Humanoid-Diffusion"
     out_dir: Path = Path("logs/dsrl/run")
     resume: Path | None = None
     # Rollouts (per GPU): groups x group_size envs, each group from one grasp start.

@@ -14,15 +14,13 @@ from hskill.s0.controller import SuperMimicController
 from hskill.s1.sources import load_diffusion_policy
 from hskill.s0.supermimic import load_tracking_policy
 
-# Held-out episodes of the diffusion policy's training split (dataset_report.json, seed 42).
-VAL_EPISODES = (3, 46, 50, 54, 79, 120, 135, 169, 171, 204, 221, 245)
-
 
 class Rollouts:
     """Env, frozen policies and grasp starts; :meth:`run` rolls one GRPO batch."""
 
     def __init__(self, args, device: str, rank: int = 0, num_envs: int | None = None, *,
-                 env_factory, starts_factory, task_cfg, layout_term, apply_grasp_start, task_tracker):
+                 env_factory, starts_factory, task_cfg, layout_term, apply_grasp_start, task_tracker,
+                 val_episodes):
         self.args, self.device = args, device
         self.layout_term, self.apply_grasp_start, self.task_tracker = layout_term, apply_grasp_start, task_tracker
         n = num_envs or args.groups * args.group_size
@@ -33,7 +31,7 @@ class Rollouts:
             self.diffusion.compile_for_training()
         self.tracker = load_tracking_policy(args.tracker_checkpoint, device=self.device)
         self.starts = starts_factory(phase=args.grasp_phase)
-        val = set(VAL_EPISODES)
+        val = set(val_episodes)
         self.train_rows = [i for i, e in enumerate(self.starts.episode_ids) if e not in val]
         self.val_rows = [i for i, e in enumerate(self.starts.episode_ids) if e in val]
         self.sensors = self.env.sim._sensor_context

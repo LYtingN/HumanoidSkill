@@ -1,6 +1,6 @@
 """Mirror the DSRL runs' metrics.jsonl into TensorBoard event files, following them as they grow.
 
-    .venv/bin/python scripts/metrics_to_tensorboard.py logs/dsrl &
+    .venv/bin/python tools/metrics_to_tensorboard.py logs/dsrl &
     .venv/bin/tensorboard --logdir logs/dsrl --port 6007 --host 127.0.0.1
 
 Every ``<run>/metrics.jsonl`` under the directory gets a ``<run>/tb`` event directory, rebuilt

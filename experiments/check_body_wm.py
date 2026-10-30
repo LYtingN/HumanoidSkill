@@ -1,6 +1,6 @@
 """How well does Phi (tracker + SuperMimic body world model) predict the robot in this scene?
 
-    uv run --extra diffusion python -m can_pnp.scripts.check_body_wm \\
+    uv run --extra diffusion python -m experiments.check_body_wm \\
         --tracker-checkpoint <supermimic>.pt --diffusion-checkpoint <Humanoid-Diffusion>/best.pt \\
         [--noise-checkpoint logs/dsrl/<run>/last.pt --noise-mode sample]
 
@@ -47,7 +47,7 @@ class Args:
     # DSRL noise policy (train_dsrl checkpoint); without one the noise is N(0, I).
     noise_checkpoint: Path | None = None
     noise_mode: Literal["sample", "mean", "base"] = "sample"
-    diffusion_repo: Path = Path("../../Diffusion/Humanoid-Diffusion")
+    diffusion_repo: Path = Path(__file__).resolve().parents[2] / "Diffusion" / "Humanoid-Diffusion"
     supermimic_repo: Path = DEFAULT_REPO
     num_envs: int = 64
     episodes: int = 1  # rollouts of num_envs episodes

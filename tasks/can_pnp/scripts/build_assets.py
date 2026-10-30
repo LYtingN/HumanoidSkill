@@ -24,7 +24,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-ASSETS = Path(__file__).resolve().parents[1] / "src" / "can_pnp" / "assets"
+from hskill.embodiment.g1_aloha import ASSETS_DIR as ROBOT_ASSETS
+
+ASSETS = Path(__file__).resolve().parents[1] / "src" / "can_pnp" / "scene" / "assets"
 SOURCE = ASSETS / "source"
 OUT = ASSETS / "scene"
 
@@ -91,7 +93,7 @@ def _find(root: ET.Element, tag: str, name: str, key: str = "name") -> ET.Elemen
 def build_g1_aloha(g1_xml: Path) -> Path:
     g1 = ET.parse(g1_xml).getroot()
     aloha = ET.parse(SOURCE / "g1_29dof_gripper_adapter20.xml").getroot()
-    out = ASSETS / "robots" / "g1_aloha"
+    out = ROBOT_ASSETS / "robots" / "g1_aloha"
     meshes = out / "meshes"
     if out.exists():
         shutil.rmtree(out)
