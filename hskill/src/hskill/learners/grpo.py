@@ -54,12 +54,22 @@ class Distributed:
 def group_advantages(returns: torch.Tensor, group_size: int,
                      min_std: float | torch.Tensor = 1e-6) -> tuple[torch.Tensor, torch.Tensor]:  # fmt: skip
     """Returns normalized within each group of consecutive envs; zero for groups whose spread is
-    at most ``min_std`` (a float, or (groups, 1) per group)."""
-    r = returns.view(-1, group_size)
-    std = r.std(dim=1, keepdim=True)
-    informative = std > min_std
-    adv = torch.where(informative, (r - r.mean(dim=1, keepdim=True)) / (std + 1e-6), torch.zeros_like(r))
-    return adv.flatten(), informative.flatten().float()  # (envs,), (groups,)
+    at most ``min_std`` (a float, or (groups, 1) per group). -> (envs,), (groups,)"""
+    return masked_group_advantages(returns, group_size, torch.ones_like(returns, dtype=torch.bool), min_std)
+
+
+def masked_group_advantages(scores: torch.Tensor, group_size: int, keep: torch.Tensor,
+                            min_std: float | torch.Tensor = 1e-6) -> tuple[torch.Tensor, torch.Tensor]:  # fmt: skip
+    """``group_advantages`` over the ``keep`` members of each group only: dropped members get 0
+    and do not enter the group's mean and spread; groups with fewer than two kept members carry
+    no signal."""
+    r, k = scores.view(-1, group_size), keep.view(-1, group_size).float()
+    count = k.sum(1, keepdim=True)
+    mean = (r * k).sum(1, keepdim=True) / count.clamp(min=1)
+    std = (((r - mean) * k).square().sum(1, keepdim=True) / (count - 1).clamp(min=1)).sqrt()
+    informative = (count >= 2) & (std > min_std)
+    adv = torch.where(informative & (k > 0), (r - mean) / (std + 1e-6), torch.zeros_like(r))
+    return adv.flatten(), informative.flatten().float()
 
 
 def update(noise_policy: NoisePolicy, optimizer: torch.optim.Optimizer, batch: dict, adv: torch.Tensor,

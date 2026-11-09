@@ -80,3 +80,14 @@ def test_value_critic_starts_greedy():
 
     v = ValueCritic(hidden=(16,))(100 * torch.randn(50, FEAT_DIM))
     assert v.shape == (50,) and (v == 0).all()  # no remainder yet: the greedy chunk return
+
+
+def test_masked_group_advantages_ignore_dropped_members():
+    from hskill.learners.grpo import masked_group_advantages
+
+    scores = torch.tensor([1.0, 2.0, 100.0, 0.0, 5.0, 5.0, 7.0, 0.0])
+    keep = torch.tensor([True, True, False, False, True, False, False, False])
+    adv, informative = masked_group_advantages(scores, 4, keep)
+    assert adv[2] == 0 and adv[3] == 0 and adv[0] < 0 < adv[1]  # the outlier did not enter the stats
+    assert informative.tolist() == [1.0, 0.0]  # one kept member: no signal
+    assert (adv[4:] == 0).all()

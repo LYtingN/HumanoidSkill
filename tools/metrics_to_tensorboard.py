@@ -1,4 +1,4 @@
-"""Mirror the DSRL runs' metrics.jsonl into TensorBoard event files, following them as they grow.
+"""Mirror the DSRL / v3 runs' metrics.jsonl into TensorBoard event files, following them as they grow.
 
     .venv/bin/python tools/metrics_to_tensorboard.py logs/dsrl &
     .venv/bin/tensorboard --logdir logs/dsrl --port 6007 --host 127.0.0.1
@@ -35,9 +35,10 @@ def main() -> None:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     break  # line still being written: read it next time
-                step = record["iteration"]
+                step_key = "iteration" if "iteration" in record else "cycle"  # DSRL / train_v3
+                step = record[step_key]
                 for key, value in record.items():
-                    if key != "iteration" and isinstance(value, (int, float)):
+                    if key != step_key and isinstance(value, (int, float)):
                         writer.add_scalar(key if "/" in key else f"update/{key}", value, step)
                 done += 1
             writer.flush()

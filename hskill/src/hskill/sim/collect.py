@@ -22,6 +22,7 @@ import torch
 from hskill.data.episodes import Episodes
 from hskill.embodiment import g1_aloha as C
 from hskill.executors.imagine import PhiStep, unflatten_history
+from hskill.executors.imaginer import ARM_JOINTS, ARM_STATE
 from hskill.s0.controller import SuperMimicController, gripper_opening
 from hskill.s0.kinematics import BodyKinematics
 from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
@@ -36,9 +37,38 @@ def kendall_tau(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return (da * db).sum((1, 2)) / pairs
 
 
+def tracking_stats(ep: Episodes, placed: torch.Tensor, failed: torch.Tensor, policy: torch.Tensor,
+                   well: float) -> dict[str, float]:  # fmt: skip
+    """How exactly S0 executed the references: right-hand error to the reference's hand on the
+    actual body. A window whose error stays below ``well`` is an exact execution of its intent (its
+    outcome is the ideal branch's ground truth); an episode that failed although tracked well
+    failed on its intent, one that failed with large errors is a candidate execution failure."""
+    err = (ep.ref_grip[..., :3] - ep.grip[..., :3]).norm(dim=-1)  # (T + 1, N)
+    live = ep.alive
+    k, H = ep.execute_steps, ep.phi_grip.shape[1] - 1
+    t = torch.arange(ep.phi_grip.shape[0], device=err.device)[:, None] * k + torch.arange(1, H + 1, device=err.device)
+    t = t.clamp(max=err.shape[0] - 1)  # incomplete windows are not in decision_alive anyway
+    window = torch.where(live[t], err[t], 0).amax(1)  # (D, H, N) -> (D, N): worst step of each window
+    win_ok = ep.decision_alive
+    ep_err = torch.where(live, err, 0).amax(0)  # (N,) worst step of each episode
+    lost = policy & ~placed
+    stats = {
+        "track/err_cm": 100 * float(err[live].mean()),
+        "track/err_p95_cm": 100 * float(err[live].quantile(0.95)) if bool(live.any()) else float("nan"),
+        "track/well_window_share": float((window[win_ok] < well).float().mean()) if bool(win_ok.any()) else float("nan"),
+    }
+    if bool(lost.any()):
+        # Failures (not done) of the policy's episodes: arms tracked well throughout vs not.
+        stats["track/fail_well_tracked_share"] = float((ep_err[lost] < well).float().mean())
+        stats["track/fail_dropped_or_fell_share"] = float(failed[lost].float().mean())
+    return stats
+
+
 class SimCollector:
-    def __init__(self, rollouts: Rollouts, phi: PhiStep, kin: BodyKinematics, horizon: int = 32):
+    def __init__(self, rollouts: Rollouts, phi: PhiStep, kin: BodyKinematics, horizon: int = 32,
+                 well_tracked: float = 0.02):  # fmt: skip
         self.rollouts, self.phi, self.body, self.kin, self.horizon = rollouts, phi, phi.body, kin, horizon
+        self.well_tracked = well_tracked  # m: right-hand tracking error of an "exactly executed" step
         env = self.env = rollouts.env
         self.device = env.device
         robot = env.scene["robot"]
@@ -60,6 +90,13 @@ class SimCollector:
         opening = gripper_opening(self.robot.data.joint_pos[:, self.gripper_ids[1]])
         return torch.cat([data.root_link_pos_w - self.env.scene.env_origins, data.root_link_quat_w,
                           data.root_link_lin_vel_w, data.root_link_ang_vel_w, opening[:, None]], dim=-1)  # fmt: skip
+
+    def ideal_grip_pose(self, arm_target: torch.Tensor) -> torch.Tensor:
+        """Right gripper pose of the actual body with the arms at ``arm_target`` (N, 14)."""
+        state = self.body.state()
+        state[:, ARM_STATE] = arm_target
+        poses = self.kin.poses(state)
+        return torch.cat([poses["gripper_pos"][:, 1], poses["gripper_quat"][:, 1]], dim=-1)
 
     def held(self) -> torch.Tensor:
         found = [s.data.found.flatten(1).gt(0).any(-1) for s in self.fingers]
@@ -106,12 +143,14 @@ class SimCollector:
         obj = torch.zeros(steps + 1, n, 14, device=device)
         command = torch.zeros(steps, n, device=device)
         held = torch.zeros(steps + 1, n, dtype=torch.bool, device=device)
+        ref_grip = torch.zeros(steps + 1, n, 7, device=device)
         alive_t = torch.zeros(steps + 1, n, dtype=torch.bool, device=device)
         phi_grip = torch.zeros(decisions, H + 1, n, 7, device=device)
         s0 = torch.zeros(decisions, n, 71, device=device)
         obs0 = torch.zeros(decisions, n, obs["policy"].shape[-1], device=device)
         decision_alive = torch.zeros(decisions, n, dtype=torch.bool, device=device)
         grip[0], obj[0], held[0], alive_t[0] = self.grip_pose(), self.object_state(), self.held(), True
+        ref_grip[0] = grip[0]
         # Phi windows: one slot per decision of the last H steps.
         slots = -(-H // k)
         win_s = body.state().repeat(slots, 1, 1)
@@ -135,6 +174,7 @@ class SimCollector:
             action = controller.act(obs, reset)
             reset = torch.zeros_like(reset)
             command[step] = controller.plan_gripper[envs, controller.step_in_chunk - 1, 1]
+            arm_target = controller.plan.joint_pos[envs, controller.step_in_chunk - 1][:, ARM_JOINTS]
             # Phi: every open window takes the step on the goal the simulated tracker just got.
             goal = self._goal(controller).repeat(slots, 1)
             _, s, _, hist = self.phi(win_hist.reshape(-1, slots * n, 93), goal, win_s.reshape(slots * n, 71), xi_slots)
@@ -157,10 +197,14 @@ class SimCollector:
             o = self.object_state()
             task.step(o[:, :3], o[:, 3:7], released, live)
             grip[step + 1], obj[step + 1], held[step + 1], alive_t[step + 1] = self.grip_pose(), o, self.held(), live
+            ref_grip[step + 1] = self.ideal_grip_pose(arm_target)
             alive &= ~(task.placed | terminated | nan)
         ro.render(True)
         records = source.records
         cond = torch.stack([r["cond"] for r in records[:decisions]])
+        noise = torch.stack([r["noise"] for r in records[:decisions]])
+        log_prob = torch.stack([r["log_prob"] for r in records[:decisions]])
+        decision_live = decision_alive.clone()
         # Windows running past the episode end are incomplete: never sampled.
         complete = torch.arange(decisions, device=device) * k + H <= steps
         decision_alive &= complete[:, None]
@@ -170,10 +214,13 @@ class SimCollector:
             final_potential=clean(task.potential(failed)), base=base_envs.clone(),
             grip=clean(grip), command=clean(command), obj=clean(obj), held=held, alive=alive_t,
             phi_grip=clean(phi_grip), cond=clean(cond), s0=clean(s0), obs0=clean(obs0),
-            decision_alive=decision_alive, xi=xi, execute_steps=k, **ctx,
+            decision_alive=decision_alive, xi=xi, execute_steps=k, ref_grip=clean(ref_grip),
+            noise=clean(noise), log_prob=clean(log_prob), decision_live=decision_live,
+            end_step=alive_t.sum(0) - 1, placed=task.placed.clone(), dropped=dropped & ~task.placed,
+            fallen=(fallen | diverged) & ~task.placed, **ctx,
         )  # fmt: skip
         policy = ~base_envs
-        stats = {}
+        stats = tracking_stats(episodes, task.placed, failed, policy, self.well_tracked)
         for name, m in (("sim", policy), ("sim_base", base_envs)):
             if bool(m.any()):
                 stats.update({
@@ -226,12 +273,16 @@ class SimCollector:
         start_alive = alive.clone()
         failed = torch.zeros(n, dtype=torch.bool, device=device)
         envs = torch.arange(n, device=device)
+        track_err = torch.zeros(n, device=device)
         ro.render(False)
         for step in range(H):
             action = controller.act(obs, reset)
             reset = torch.zeros_like(reset)
             released = controller.plan_gripper[envs, controller.step_in_chunk - 1, 1] > ro.task.release_opening
+            arm_target = controller.plan.joint_pos[envs, controller.step_in_chunk - 1][:, ARM_JOINTS]
             obs, _, terminated, _, _ = env.step(action)
+            hand_err = (self.ideal_grip_pose(arm_target)[:, :3] - self.grip_pose()[:, :3]).norm(dim=-1)
+            track_err = torch.where(alive, torch.maximum(track_err, hand_err), track_err)
             fell, drop, nan = ro.failures(alive, terminated)
             failed |= fell | drop | nan
             live = alive & ~terminated & ~nan
@@ -244,14 +295,28 @@ class SimCollector:
         d0 = (obj0[:, :3] - start["goal"]).norm(dim=-1)
         true = task.potential(failed) - torch.exp(-d0 / ro.task.dist_scale)
         imagined = imaginer.chunk_return(start, record["noise"])
-        pred = imagined["returns"]
+        # The simulator only sees the chunk: compare the imagined chunk outcomes (object WM on Phi's
+        # hands), not the critic's estimate of the episode beyond it.
+        pred = imagined["chunk_returns"]
         tau = kendall_tau(pred.view(-1, group), true.view(-1, group))
         # Groups that broke up before the decision, or whose candidates all score the same, carry no ranking.
         ok = start_alive.view(-1, group).all(1) & tau.isfinite()
         # Final can position of the candidates whose episode did not end in a reset.
         kept = start_alive & ~failed
         err = (imagined["final_pos"] - self.object_state()[:, :3]).norm(dim=-1)
+        # Ideal branch: where S0 executed the candidate's arms exactly, the simulated return is the
+        # intent's own value, which the ideal branch predicts; elsewhere the predicted gap should be larger.
+        exact = start_alive & (track_err < self.well_tracked)
+        gap = imagined["chunk_returns_ideal"] - pred
+        ideal_check = {
+            "rank/exact_share": float(exact.float().mean()),
+            "rank/ideal_mae_exact": float((imagined["chunk_returns_ideal"] - true).abs()[exact].mean()) if bool(exact.any()) else float("nan"),
+            "rank/gap_exact": float(gap[exact].mean()) if bool(exact.any()) else float("nan"),
+            "rank/gap_inexact": float(gap[start_alive & ~exact].mean()) if bool((start_alive & ~exact).any()) else float("nan"),
+            "rank/track_err_cm": float(100 * track_err[start_alive].mean()) if bool(start_alive.any()) else float("nan"),
+        }  # fmt: skip
         return {
+            **ideal_check,
             "rank/tau": float(tau[ok].mean()) if bool(ok.any()) else float("nan"),
             "rank/groups": int(ok.sum()),
             "rank/return_mae": float((pred - true).abs()[start_alive].mean()),

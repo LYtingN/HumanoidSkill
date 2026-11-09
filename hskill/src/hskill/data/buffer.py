@@ -54,12 +54,17 @@ class EpisodeBuffer:
         H = self.horizon
         parts = []
         for ep, d, e in self._pick(n):
+            T = ep.command.shape[0]
             t = d[None] * ep.execute_steps + torch.arange(H + 1, device=d.device)[:, None]  # (H + 1, m)
-            phi = torch.rand(len(d), device=d.device) < phi_fraction
-            grip = torch.where(phi[None, :, None], ep.phi_grip[d, :, e].transpose(0, 1), ep.grip[t, e])
+            inside = t <= T  # windows longer than Phi's may run past the rollout's end: masked
+            t = t.clamp(max=T)
+            grip = ep.grip[t, e]
+            if phi_fraction > 0:  # Phi's windows have Phi's horizon, which is then H
+                phi = torch.rand(len(d), device=d.device) < phi_fraction
+                grip = torch.where(phi[None, :, None], ep.phi_grip[d, :, e].transpose(0, 1), grip)
             parts.append({
-                "obj": ep.obj[t, e], "grip": grip, "command": ep.command[t[:-1], e],
-                "held": ep.held[t[1:], e], "mask": ep.alive[t[1:], e],
+                "obj": ep.obj[t, e], "grip": grip, "command": ep.command[t[:-1].clamp(max=T - 1), e],
+                "held": ep.held[t[1:], e], "mask": ep.alive[t[1:], e] & inside[1:],
                 "box": ep.box[e], "table": ep.table[e],
             })  # fmt: skip
         return {k: torch.cat([p[k] for p in parts], dim=1 if k in TIME_MAJOR else 0) for k in parts[0]}
@@ -75,5 +80,7 @@ class EpisodeBuffer:
                 "obj0": ep.obj[d * ep.execute_steps, e], "box": ep.box[e], "table": ep.table[e], "goal": ep.goal[e],
                 "final": ep.final_potential[e], "time": (d * ep.execute_steps).float() / steps,
                 "step_frac": torch.full_like(d, 1, dtype=torch.float32) / steps,
+                # Steps from the decision to the episode's end (for discounted critic targets).
+                "to_end": ((ep.end_step[e] if ep.end_step is not None else torch.full_like(e, steps)) - d * ep.execute_steps).float(),
             })  # fmt: skip
         return {k: torch.cat([p[k] for p in parts]) for k in parts[0]}

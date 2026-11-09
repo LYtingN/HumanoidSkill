@@ -38,6 +38,7 @@ class GraspStarts:
         self.phase = phase
         rows = [episodes[str(i)] for i in self.episode_ids]
         frames = [row["phases"][phase] for row in rows]
+        self.frame = torch.tensor([int(f["frame"]) for f in frames])  # episode frame of the start
 
         def stack(key: str) -> torch.Tensor:
             return torch.tensor([f[key] for f in frames], dtype=torch.float32)

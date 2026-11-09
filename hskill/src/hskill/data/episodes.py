@@ -28,3 +28,16 @@ class Episodes:
     final_potential: torch.Tensor  # (N,) the episode's return (task potential at its end)
     base: torch.Tensor  # (N,) bool, the env ran on N(0, I) noise
     execute_steps: int = 8
+    # Right gripper pose of the reference's arm joints on the actual body after each step (the
+    # hand an exact arm tracker would have): the measured counterpart of the ideal branch.
+    ref_grip: torch.Tensor | None = None  # (T + 1, N, 7)
+    # Per decision, for the simulator's own GRPO update: the noise taken, its log-likelihood and
+    # whether the env was still in its episode.
+    noise: torch.Tensor | None = None  # (D, N, dim)
+    log_prob: torch.Tensor | None = None  # (D, N)
+    decision_live: torch.Tensor | None = None  # (D, N) bool
+    end_step: torch.Tensor | None = None  # (N,) last step of each episode (done, failed or time-out)
+    # How each episode ended (none of them: time-out).
+    placed: torch.Tensor | None = None  # (N,) bool
+    dropped: torch.Tensor | None = None  # (N,) bool
+    fallen: torch.Tensor | None = None  # (N,) bool (or diverged)

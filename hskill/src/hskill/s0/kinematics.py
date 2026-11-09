@@ -98,12 +98,13 @@ class BodyKinematics:
             "gripper_pos": gripper_pos, "gripper_quat": gripper_quat,
             "camera_pos": camera_pos, "camera_quat": camera_quat,
             "torso_pos": torso_pos, "torso_quat": torso_quat,
+            "wrist_pos": wrist_pos, "wrist_quat": wrist_quat,
         }  # fmt: skip
 
     def poses(self, s: torch.Tensor) -> dict[str, torch.Tensor]:
         """States (..., 71) -> ``gripper_pos`` (..., 2, 3) / ``gripper_quat`` (..., 2, 4)
-        (left, right), ``camera_pos`` (..., 3) / ``camera_quat`` (..., 4), ``torso_*`` alike;
-        positions in the env frame of the states."""
+        (left, right), ``wrist_*`` alike (the ``wrist_yaw_link`` frames), ``camera_pos`` (..., 3) /
+        ``camera_quat`` (..., 4), ``torso_*`` alike; positions in the env frame of the states."""
         shape = s.shape[:-1]
         out = self._poses(s.reshape(-1, s.shape[-1]))
         return {k: v.reshape(*shape, *v.shape[1:]) for k, v in out.items()}
