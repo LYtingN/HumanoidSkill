@@ -76,3 +76,19 @@ def test_moving_can_in_the_box_is_not_done():
         moving = pos + torch.tensor([[0.002 * (i % 2), 0.0, 0.0]])  # 0.1 m/s back and forth
         task.step(moving, upright, torch.tensor([True]), live)
     assert not task.placed.item()
+
+
+def test_can_resting_in_the_box_in_the_hand_is_not_done():
+    geo, cfg = SceneGeometryCfg(), TaskCfg()
+    box = torch.tensor([[0.5, 0.0, 0.85]]).repeat(4, 1)
+    in_box = torch.tensor([[0.5, 0.0, geo.box_bottom_z + geo.can_height / 2]]).repeat(4, 1)
+    upright, live = torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(4, 1), torch.ones(4, dtype=torch.bool)
+    # Held / let go (contact sensing), and without it: gripper commanded closed / open.
+    cases = ((torch.tensor([True, False]), torch.tensor([False, False])), (None, torch.tensor([False, True])))
+    done = []
+    for held, released in cases:
+        task = TaskTracker(cfg, geo, box[:2], box[:2], torch.zeros(2), in_box[:2], step_dt=0.02)
+        for _ in range(task.hold_steps):
+            task.step(in_box[:2], upright[:2], released, live[:2], held)
+        done += task.placed.tolist()
+    assert done == [False, True, False, True]

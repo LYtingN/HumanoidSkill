@@ -1,10 +1,12 @@
 """Task bookkeeping of the can pick-and-place episode, shared by simulated and imagined rollouts.
 
-Done: the can rests in the box (slower than ``rest_speed``) for ``success_hold_s``, whatever its
-pose and the gripper; with ``upright_release`` (the earlier, stricter definition) it must also be
-upright (axis within ``acos(upright_cos)`` of vertical) and the right gripper commanded open
-(> ``release_opening``). About half of the cans lowered into the box end up lying on their side in it
-with the gripper still closed, which the stricter definition counted as neither done nor failed.
+Done: the can rests in the box (slower than ``rest_speed``), let go of (the fingers no longer both
+on it; without contact sensing: the right gripper commanded open, > ``release_opening``), for
+``success_hold_s``, whatever its pose; with ``upright_release`` (the earlier, stricter definition) it
+must be upright (axis within ``acos(upright_cos)`` of vertical) and the gripper commanded open. About
+half of the cans lowered into the box end up lying on their side in it, slipped out of the closed
+gripper, which the stricter definition counted as neither done nor failed; a can resting in the box
+still in the hand is not done (most cans lowered into the box rest there before the release).
 
 Toppled: outside the box, the can not held and its axis tilted past ``acos(topple_cos)`` for
 ``success_hold_s``. The shaping alone would still reward a can knocked over towards the box (its
@@ -93,7 +95,8 @@ class TaskTracker:
         self.toppled |= self.tilted >= self.hold_steps
         self.lifted |= live & (can_z > geo.table_height + geo.can_height / 2 + 0.05)
         self.entered |= live & in_box
-        settled = live & in_box & rest & ((upright & released) if self.cfg.upright_release else True)
+        let_go = released if held is None else ~held
+        settled = live & in_box & rest & ((upright & released) if self.cfg.upright_release else let_go)
         self.hold = torch.where(settled, self.hold + 1, 0)
         self.placed |= self.hold >= self.hold_steps
         dist = (can_pos - self.goal).norm(dim=-1)
