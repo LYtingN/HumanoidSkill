@@ -27,6 +27,17 @@ def load_diffusion_policy(checkpoint: str | Path, repo: str | Path, device: str 
         )
     return policy, config
 
+def set_sampling(policy, execute_steps: int | None = None, inference_steps: int | None = None) -> None:
+    """Override the checkpoint's control steps per reference (replanning interval, at most the
+    reference ``horizon``) and its number of DDIM steps; None keeps the checkpoint's."""
+    if execute_steps is not None:
+        if not 0 < execute_steps <= policy.horizon:
+            raise ValueError(f"execute_steps must be in [1, {policy.horizon}], got {execute_steps}")
+        policy.execute_steps = execute_steps
+    if inference_steps is not None:
+        policy.inference_steps = inference_steps
+
+
 class StandSource:
     """Hold the default pose with the root orientation of the moment."""
 

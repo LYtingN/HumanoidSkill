@@ -12,7 +12,7 @@ from mjlab.utils.nan_guard import NanGuard
 from hskill.s0.controller import SuperMimicController
 from hskill.s0.supermimic import load_tracking_policy
 from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
-from hskill.s1.sources import load_diffusion_policy
+from hskill.s1.sources import load_diffusion_policy, set_sampling
 
 
 class Rollouts:
@@ -27,10 +27,13 @@ class Rollouts:
         self.env = env_factory(n, args.seed + rank, self.device)
         self.diffusion, _ = load_diffusion_policy(args.diffusion_checkpoint, args.diffusion_repo, self.device)
         self.diffusion.requires_grad_(False)
+        set_sampling(self.diffusion, getattr(args, "execute_steps", None), getattr(args, "ddim_steps", None))
         if args.compile:
-            self.diffusion.compile_for_training()
+            # e.g. "max-autotune-no-cudagraphs": ~6% faster DINOv3 + DiT inference than the default, longer warm-up.
+            self.diffusion.compile_for_training(mode=getattr(args, "compile_mode", None))
         self.tracker = load_tracking_policy(args.tracker_checkpoint, device=self.device)
-        self.starts = starts_factory(phase=args.grasp_phase)
+        # A reverse curriculum (``args.curriculum``, phases easy to hard) loads the starts of all its phases.
+        self.starts = starts_factory(phase=tuple(getattr(args, "curriculum", ())) or args.grasp_phase)
         val = set(val_episodes)
         self.train_rows = [i for i, e in enumerate(self.starts.episode_ids) if e not in val]
         self.val_rows = [i for i, e in enumerate(self.starts.episode_ids) if e in val]

@@ -1,11 +1,23 @@
 """Task bookkeeping of the can pick-and-place episode, shared by simulated and imagined rollouts.
 
 Done: the can rests in the box, upright (axis within ``acos(upright_cos)`` of vertical) and the
-right gripper commanded open (> ``release_opening``), all for ``success_hold_s``. The return is
-a function of the final state: ``success_reward`` once done, else ``exp(-d / dist_scale)`` of the
-can's distance ``d`` to the placement goal, 0 after a fall or a dropped can. A chunk of an
-episode is worth the change of that potential over it (potential-based shaping), so the chunks
-of an episode sum to its return minus the start's potential.
+right gripper commanded open (> ``release_opening``), all for ``success_hold_s``.
+
+Reward: a terminal reward and a potential-based shaping, kept apart,
+
+    r_k    = R_term(s_{k+1}) + gamma * phi(s_{k+1}) - phi(s_k)
+    R_term = success_reward once done, 0 after a fall or a dropped can; both end the episode,
+             and phi = 0 at an episode's end
+    phi(s) = sum_i w_i * exp(-d / scale_i)   (``dist_weights``, ``dist_scales``; d the can's
+             distance to the placement goal)
+
+A failure costs no explicit penalty: the episode ends, and with it every reward still to come. A
+time-out does not end the episode (a critic bootstraps it). The shaping of an episode that ends
+telescopes to -phi(s_0), whatever the policy did, so only the terminal reward and, at a time-out,
+phi of the last state tell episodes from the same start apart. Undiscounted (gamma = 1), the
+rewards of an episode or of a chunk sum to :meth:`TaskTracker.potential` at its end minus phi at
+its start: success_reward once done, 0 after a failure, else phi. Two scales keep the shaping
+informative far from the goal (the 0.5 m term) and precise near it (the 0.1 m term).
 
 Positions only need a common frame (world, or env frame for the imagined rollouts).
 """
@@ -22,11 +34,17 @@ from can_pnp.scene.config import SceneGeometryCfg
 @dataclass
 class TaskCfg:
     success_reward: float = 10.0
-    dist_scale: float = 0.1  # m
+    dist_scales: tuple[float, ...] = (0.1, 0.5)  # m, the shaping's exponential length scales
+    dist_weights: tuple[float, ...] = (0.5, 0.5)  # their weights (phi = 1 at the goal)
     success_hold_s: float = 0.2
     upright_cos: float = 0.866
     release_opening: float = 0.03  # m; the recorded release opens to 0.065, the grasp closes to 0
     drop_height: float = 0.2  # env ``can_dropped`` termination (can z above the env origin)
+
+
+def shaping_potential(dist: torch.Tensor, cfg: TaskCfg) -> torch.Tensor:
+    """phi of the can's distance to the placement goal (m): the weighted exponentials, 1 at the goal."""
+    return sum(w * torch.exp(-dist / s) for s, w in zip(cfg.dist_scales, cfg.dist_weights, strict=True))
 
 
 class TaskTracker:
@@ -60,7 +78,16 @@ class TaskTracker:
         self.final_dist = torch.where(live, dist, self.final_dist)
         self.min_dist = torch.where(live, torch.minimum(self.min_dist, dist), self.min_dist)
 
+    def shaping(self) -> torch.Tensor:
+        """phi of the can's latest live position (at construction: of the start)."""
+        return shaping_potential(self.final_dist, self.cfg)
+
+    def terminal_reward(self) -> torch.Tensor:
+        """R_term of the episodes so far: success_reward once done, else 0 (a failure as well)."""
+        return torch.where(self.placed, self.cfg.success_reward, 0.0).float()
+
     def potential(self, failed: torch.Tensor) -> torch.Tensor:
-        """Return of the episodes so far: done > failed (fall / drop / divergence) > distance."""
-        shaped = torch.where(failed, 0.0, torch.exp(-self.final_dist / self.cfg.dist_scale))
-        return torch.where(self.placed, self.cfg.success_reward, shaped).float()
+        """The undiscounted rewards so far plus phi of the start: R_term of an ended episode (done or
+        failed: fall / drop / divergence, phi = 0 there), else phi of the can's latest position."""
+        live = torch.where(failed, 0.0, self.shaping())
+        return torch.where(self.placed, self.terminal_reward(), live).float()

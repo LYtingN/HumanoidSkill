@@ -132,3 +132,20 @@ def reference_states(plan: ReferenceTrajectory, s0: torch.Tensor, horizon: int |
     s[..., 3:7] = quat[:, k].transpose(0, 1)
     s[..., 7:36] = plan.joint_pos[:, k].transpose(0, 1)
     return torch.cat([s0[None], s])
+
+
+@torch.no_grad()
+def reference_frames(plan: ReferenceTrajectory, s0: torch.Tensor, frames: int | None = None) -> torch.Tensor:
+    """(F, N, 71) the reference's frames 0 .. F - 1 as body states (velocities left at zero): all
+    joints from the plan, the root rotation from the plan and its position by the plan's leg
+    odometry from the replan state ``s0`` (N, 71). Executed exactly, state k + 1 is frame k (as
+    SuperMimic judges the state after control step k against reference frame k), so these are the
+    states 1 .. F of the ideal branch."""
+    frames = frames or plan.horizon
+    pos, quat = _reference_root(plan, s0)
+    f = torch.clamp(torch.arange(frames, device=s0.device), max=plan.horizon - 1)
+    s = torch.zeros(frames, *s0.shape, device=s0.device)
+    s[..., 0:3] = pos[:, f].transpose(0, 1)
+    s[..., 3:7] = quat[:, f].transpose(0, 1)
+    s[..., 7:36] = plan.joint_pos[:, f].transpose(0, 1)
+    return s

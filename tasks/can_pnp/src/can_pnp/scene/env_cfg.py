@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import mujoco
+import torch
 from hskill.embodiment import g1_aloha as C
 from hskill.embodiment.robot import robot_cfg
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE
@@ -203,7 +204,10 @@ def make_env_cfg(a: CanPnpEnvCfgArgs) -> ManagerBasedRlEnvCfg:
 
 
 def make_env(a: CanPnpEnvCfgArgs, device: str = "cuda:0") -> ManagerBasedRlEnv:
-    from mjlab.utils.torch import configure_torch_backends
-
-    configure_torch_backends()
+    # mjlab's configure_torch_backends(), but through the legacy TF32 flags: its fp32_precision
+    # ("tf32") makes the legacy getters raise, which torch.compile's max-autotune reads.
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
     return ManagerBasedRlEnv(make_env_cfg(a), device=device)

@@ -12,7 +12,7 @@ humanoid_skill/
 │   ├── s1/                      # reference sources and DSRL noise policy
 │   ├── executors/               # body imagination (Φ) and imagined chunk returns
 │   ├── interaction/             # object world model
-│   ├── learners/                # GRPO and critic
+│   ├── learners/                # GRPO
 │   ├── data/                    # recorded episodes and replay buffer
 │   ├── sim/                     # rollouts and collection with supplied task callbacks
 │   └── utils/                   # colors and plan visualization

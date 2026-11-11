@@ -69,3 +69,8 @@ GRIPPER_CLOSED_Q = 0.035
 
 # Bodies named in the Isaac Lab contact sensors (right-hand fingers against the target can).
 RIGHT_FINGER_BODIES = ("right_aloha2_finger_left", "right_aloha2_finger_right")
+
+# Keypoints of the object world model, in this order: the pelvis (root), both feet (ankle roll
+# links, as SuperMimic's five-point goal) and both end effectors (the ALOHA gripper bases).
+KEYPOINT_BODIES = ("pelvis", "left_ankle_roll_link", "right_ankle_roll_link", "left_gripper_base", "right_gripper_base")
+RIGHT_EEF = 4  # index of the right gripper base in KEYPOINT_BODIES

@@ -1,8 +1,9 @@
 """World-model preview for the live viewer: what the models expect the current plan to do.
 
 At every replan, from the state of that moment, Phi (tracker + SuperMimic body world model)
-executes the new reference for its whole horizon and the object world model rolls the target
-object along Phi's right-gripper path and the reference's commanded openings. The viewer then
+executes the new reference for its whole horizon and the object world model predicts the target
+object from the last frames (keypoints, gripper openings, object) and Phi's future keypoints with
+the reference's commanded openings. The viewer then
 shows, until the next replan, the predicted gripper path, the predicted object path and the
 object's actual path since the replan; the prediction error at the last executed step of each
 plan is averaged for the overlay.
@@ -10,7 +11,6 @@ plan is averaged for the overlay.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import mujoco
@@ -35,19 +35,18 @@ ACTUAL_RGB = (1.0, 1.0, 1.0)  # simulated object
 
 
 class WorldModelPreview:
-    """``context`` returns the object WM's env-frame ``{"box", "table"}`` centres of all envs."""
-
     def __init__(self, env: ManagerBasedRlEnv, controller: SuperMimicController, body: BodyWorldModel,
-                 kin: BodyKinematics, object_wm: ObjectWorldModel | ObjectWMEnsemble, context: Callable[[], dict[str, torch.Tensor]],
+                 kin: BodyKinematics, object_wm: ObjectWorldModel | ObjectWMEnsemble,
                  object_name: str = "can", radius: float = 0.012):  # fmt: skip
         self.env, self.controller, self.body, self.kin = env, controller, body, kin
-        self.object_wm, self.context, self.radius = object_wm.eval(), context, radius
+        self.object_wm, self.radius = object_wm.eval(), radius
         self.phi = PhiStep(body, controller.tracker, compile=False)
         robot = env.scene["robot"]
         self.robot, self.object = robot, env.scene[object_name]
-        self.right_gripper = robot.find_joints(C.GRIPPER_JOINT_NAMES, preserve_order=True)[0][1]
+        self.grippers = robot.find_joints(C.GRIPPER_JOINT_NAMES, preserve_order=True)[0]
+        self.kp_bodies = [robot.body_names.index(b) for b in C.KEYPOINT_BODIES]
         self.origins = env.scene.env_origins
-        self.pending: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.pending: tuple[torch.Tensor, ...] | None = None
         self.reset()
 
     def reset(self) -> None:
@@ -56,17 +55,25 @@ class WorldModelPreview:
         self.pred_gripper: np.ndarray | None = None
         self.actual = [[] for _ in range(n)]  # object positions since each env's last replan
         self.errors: list[float] = []  # cm, at the last executed step of each plan
+        self.frames: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []  # the object WM's history
 
-    def object_state(self) -> torch.Tensor:
-        """(N, 14) env-frame object state and right finger opening, as ``hskill.sim.collect``."""
-        data = self.object.data
-        opening = gripper_opening(self.robot.data.joint_pos[:, self.right_gripper])
-        return torch.cat([data.root_link_pos_w - self.origins, data.root_link_quat_w, data.root_link_lin_vel_w,
-                          data.root_link_ang_vel_w, opening[:, None]], dim=-1)  # fmt: skip
+    def frame(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Keypoints (N, 5, 7), gripper openings (N, 2) and object (N, 10), env frame, as
+        ``hskill.sim.collect``."""
+        robot, data = self.robot.data, self.object.data
+        kp = torch.cat([robot.body_link_pos_w[:, self.kp_bodies] - self.origins[:, None],
+                        robot.body_link_quat_w[:, self.kp_bodies]], dim=-1)  # fmt: skip
+        obj = torch.cat([data.root_link_pos_w - self.origins, data.root_link_quat_w, data.root_link_lin_vel_w], dim=-1)
+        return kp, gripper_opening(robot.joint_pos[:, self.grippers]), obj
 
     def before_act(self, obs: dict[str, torch.Tensor]) -> None:
-        """The replan state: robot state, tracker observation and object, before ``act``."""
-        self.pending = (self.body.state(), obs["policy"].clone(), self.object_state())
+        """The replan state: robot state, tracker observation and history, before ``act``."""
+        if not self.frames:
+            self.frames = [self.frame()]
+        L = self.object_wm.cfg.history
+        frames = [self.frames[0]] * (L - len(self.frames)) + self.frames[-L:]  # before the start: its first frame
+        hist = tuple(torch.stack([f[i] for f in frames]) for i in range(3))
+        self.pending = (self.body.state(), obs["policy"].clone(), *hist)
 
     @torch.no_grad()
     def after_act(self) -> None:
@@ -74,14 +81,13 @@ class WorldModelPreview:
         fresh = (self.controller.step_in_chunk == 1).cpu().numpy()
         if self.pred_object is not None and not fresh.any():
             return
-        s0, obs0, obj0 = self.pending
+        s0, obs0, hist_kp, hist_width, hist_obj = self.pending
         plan = self.controller.plan
         rollout = imagine_body(self.phi, plan, s0, obs0, self.body.context())
-        poses = self.kin.poses(rollout.states)
-        gripper = torch.cat([poses["gripper_pos"][..., 1, :], poses["gripper_quat"][..., 1, :]], dim=-1)
-        command = self.controller.plan_gripper[:, :, 1].T  # (H, N) commanded right opening
-        ctx = self.context()
-        objs, _ = self.object_wm.rollout(obj0, gripper, command, ctx["box"], ctx["table"])
+        fut_kp = self.kin.keypoints(rollout.states[1:])  # (H, N, 5, 7)
+        command = self.controller.plan_gripper.transpose(0, 1)  # (H, N, 2) commanded openings
+        objs, _ = self.object_wm.rollout(hist_kp, hist_width, hist_obj, fut_kp, command)
+        gripper = torch.cat([hist_kp[-1:, :, C.RIGHT_EEF], fut_kp[:, :, C.RIGHT_EEF]])
         origins = self.origins.cpu().numpy()[:, None]
         pred_object = objs[..., :3].transpose(0, 1).cpu().numpy() + origins
         pred_gripper = gripper[..., :3].transpose(0, 1).cpu().numpy() + origins
@@ -96,6 +102,7 @@ class WorldModelPreview:
             self.actual[i] = [pred_object[i, 0]]
 
     def after_step(self) -> None:
+        self.frames = (self.frames + [self.frame()])[-self.object_wm.cfg.history :]
         positions = self.object.data.root_link_pos_w.cpu().numpy()
         for i, path in enumerate(self.actual):
             if len(path) < self.pred_object.shape[1]:

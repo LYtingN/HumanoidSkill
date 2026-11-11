@@ -34,11 +34,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-# Headless CPU rendering through EGL when there is no display but the system has EGL; otherwise
-# the overview renders are skipped (the head camera renders on the GPU through mujoco_warp
-# either way). With a display, the default GLFW backend also serves the live viewer.
-if "MUJOCO_GL" not in os.environ and not os.environ.get("DISPLAY") and ctypes.util.find_library("EGL"):
+# Offscreen (overview) renders through EGL on the GPU whenever the system has EGL, also with a
+# display: GLFW there is Mesa llvmpipe (~180 ms per overview frame). Without EGL the overview
+# renders are skipped (the head camera renders on the GPU through mujoco_warp either way). The
+# live viewer is a GLFW window either way.
+if "MUJOCO_GL" not in os.environ and ctypes.util.find_library("EGL"):
     os.environ["MUJOCO_GL"] = "egl"
+# The X server runs the NVIDIA driver, but glvnd hands GLX windows (the viewer) to Mesa llvmpipe.
+os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
 
 import mujoco
 import numpy as np
@@ -55,7 +58,7 @@ from hskill.s0.controller import SuperMimicController
 from hskill.s0.kinematics import BodyKinematics
 from hskill.s0.supermimic import load_tracking_policy
 from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
-from hskill.s1.sources import DatasetSource, DiffusionSource, StandSource, load_diffusion_policy
+from hskill.s1.sources import DatasetSource, DiffusionSource, StandSource, load_diffusion_policy, set_sampling
 from hskill.utils.plan_viz import PlanKeypoints
 from hskill.utils.wm_viz import WorldModelPreview
 from mjlab.utils.lab_api.math import matrix_from_quat
@@ -71,6 +74,9 @@ class Args:
     # (the unsteered diffusion policy).
     noise_mode: Literal["mean", "sample", "base"] = "mean"
     diffusion_repo: Path = Path(__file__).resolve().parents[2] / "Diffusion" / "Humanoid-Diffusion"
+    # Diffusion sampling; None keeps the checkpoint's (replan every 8 control steps, 16 DDIM steps).
+    execute_steps: int | None = None
+    ddim_steps: int | None = None
     episode: Path | None = None  # dataset source: a LeRobot episode parquet
     num_envs: int = 4
     seconds: float = 20.0  # <= 0: no limit, run until the viewer is closed or Ctrl-C
@@ -80,7 +86,7 @@ class Args:
     # env starts from the recorded state of a collected episode at the start of --grasp-phase
     # (arm already at the can, gripper open; table and cans as recorded).
     start: Literal["collection", "pregrasp", "grasp"] = "collection"
-    grasp_phase: Literal["REACH", "CLOSE"] = "CLOSE"
+    grasp_phase: Literal["REACH", "CLOSE", "LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE"] = "CLOSE"
     grasp_episodes: tuple[int, ...] = ()  # LeRobot episode per env (default: env i -> episode i)
     # Mass of both cans (kg); the collected episodes use 0.62. SuperMimic's arm cannot lift that
     # with the gripper's payload, a light can isolates the policy from that limitation.
@@ -94,6 +100,13 @@ class Args:
     plan_radius: float = 0.004  # m: tube radius of the plan keypoint paths
     seed: int = 0
     viewer: bool = False  # live MuJoCo viewer of all envs (needs a display)
+    # mjlab: mjlab's NativeMujocoViewer (real time by its sim-time budget; Enter restarts, Space
+    # pauses; no videos, metrics or summary). legacy: this script's viewer with the head cameras.
+    viewer_kind: Literal["mjlab", "legacy"] = "mjlab"
+    viewer_fps: float = 30.0  # mjlab viewer
+    # mjlab viewer window. It opens at 2/3 of the 5120 x 2824 screen; presenting frames that large
+    # on this virtual display limits it to ~0.08x real time (1280 x 800: ~1x).
+    viewer_size: tuple[int, int] = (1280, 800)
     start_paused: bool = False  # viewer: show the initial state until Space is pressed
     realtime: bool = True  # viewer: pace the loop to 50 Hz
     show_plan: bool = True  # viewer and overview video: future pelvis / hands / feet of the current reference plan
@@ -239,24 +252,66 @@ class _LiveViewer:
         self.handle.close()
 
 
+def resize_window(title: str, width: int, height: int) -> bool:
+    """Resize the X11 windows titled ``title`` (False while there is none)."""
+    import subprocess
+
+    tree = subprocess.run(["xwininfo", "-root", "-tree"], capture_output=True, text=True, check=False).stdout
+    ids = [line.split()[0] for line in tree.splitlines() if f'"{title}"' in line]
+    if not ids:
+        return False
+    x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    display = ctypes.c_void_p(x11.XOpenDisplay(None))
+    for wid in ids:
+        x11.XResizeWindow(display, ctypes.c_ulong(int(wid, 16)), width, height)
+    x11.XCloseDisplay(display)
+    return True
+
+
+class MjlabViewerPolicy:
+    """A controller as the policy of mjlab's viewer, with its plan drawn as debug geometry.
+
+    Registered in ``env.manager_visualizers``, so the viewer calls ``debug_vis`` every frame.
+    ``restart(env_ids)`` re-applies the start of envs the env reset (a terminated episode, or all
+    envs on the viewer's Enter). The controller reads ``env.obs_buf``: the viewer's own
+    ``get_observations()`` does not advance the observation history.
+    """
+
+    def __init__(self, env, controller, restart, plan=None, window_size: tuple[int, int] | None = None):
+        self.env, self.controller, self.restart, self.plan = env, controller, restart, plan
+        self.reset_mask = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+        self.window_size = window_size  # applied once the viewer's window exists
+        env.manager_visualizers["controller_plan"] = self
+
+    def __call__(self, obs):
+        if self.window_size is not None and resize_window("MuJoCo : mjlab scene", *self.window_size):
+            self.window_size = None
+        action = self.controller.act(self.env.obs_buf, self.reset_mask)
+        self.reset_mask = torch.zeros_like(self.reset_mask)
+        if self.plan is not None:
+            self.plan.update()
+        return action
+
+    def reset(self, dones=None):
+        ids = torch.arange(self.env.num_envs, device=self.env.device) if dones is None else dones.nonzero().flatten()
+        if len(ids):
+            self.restart(ids)
+            self.reset_mask[ids] = True
+
+    def debug_vis(self, visualizer) -> None:
+        if self.plan is not None:
+            self.plan.draw(visualizer._mjv_scene)
+
+
 def _world_model_preview(args: Args, env, controller: SuperMimicController) -> WorldModelPreview:
-    """Object world model of a train_v3 checkpoint, with the scene context it was trained on."""
+    """Object world model of a train_v3 checkpoint."""
     state = torch.load(args.object_wm_checkpoint, map_location=args.device, weights_only=False)
     object_wm = load_object_wm(state, env.step_dt).to(args.device)
     body = BodyWorldModel(env, args.tracker_checkpoint)
     kin = BodyKinematics(env, body, compile=False)
-    geo = env.cfg.events["reset_layout"].params["scene_cfg"].geometry
-
-    def context() -> dict[str, torch.Tensor]:
-        term = layout_term(env)
-        table = torch.stack([
-            term.layout["table_front_x"] + geo.table_size[0] / 2, term.layout["table_center_y"],
-            torch.full_like(term.layout["table_center_y"], geo.table_height),
-        ], dim=-1)  # fmt: skip
-        return {"box": term.box_center_w - env.scene.env_origins, "table": table}
-
     print(f"object world model: {args.object_wm_checkpoint} (cycle {state['cycle']})")
-    return WorldModelPreview(env, controller, body, kin, object_wm, context)
+    return WorldModelPreview(env, controller, body, kin, object_wm)
 
 
 def main(args: Args | None = None) -> None:
@@ -284,6 +339,7 @@ def main(args: Args | None = None) -> None:
         if args.diffusion_checkpoint is None:
             raise SystemExit(f"--diffusion-checkpoint is required for --source {args.source}")
         policy, _ = load_diffusion_policy(args.diffusion_checkpoint, args.diffusion_repo, args.device)
+        set_sampling(policy, args.execute_steps, args.ddim_steps)
         source = DiffusionSource(policy)
     if args.source == "dsrl":
         if args.noise_checkpoint is None:
@@ -323,6 +379,20 @@ def main(args: Args | None = None) -> None:
         obs = env.obs_buf
         print(f"grasp start: episodes {list(episodes)} at {args.grasp_phase}")
     n, device = env.num_envs, env.device
+    if args.viewer and args.viewer_kind == "mjlab":
+        from mjlab.viewer import NativeMujocoViewer
+
+        def restart(ids):
+            if grasp is not None:
+                apply_grasp_start(env, ids, grasp, grasp_rows[ids.cpu()])
+
+        plan = PlanKeypoints(env, controller, radius=args.plan_radius) if args.show_plan else None
+        print(f"mjlab viewer: start={args.start}, Enter restarts, Space pauses", flush=True)
+        if plan is not None:
+            print(PlanKeypoints.legend(), flush=True)
+        policy = MjlabViewerPolicy(env, controller, restart, plan, args.viewer_size)
+        NativeMujocoViewer(env, policy, frame_rate=args.viewer_fps).run()
+        return
     reset = torch.ones(n, dtype=torch.bool, device=device)
     steps = None if unlimited else int(round(args.seconds / env.step_dt))
     geo = env.cfg.events["reset_layout"].params["scene_cfg"].geometry

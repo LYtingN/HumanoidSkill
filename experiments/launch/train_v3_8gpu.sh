@@ -17,6 +17,8 @@ NPROC="${NPROC:-8}"
 # remote-26, which has no libEGL).
 export MUJOCO_GL="${MUJOCO_GL:-disable}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+# Less fragmentation of the torch allocator next to other jobs on the shared GPUs.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 mkdir -p "$OUTPUT_DIR"
 # Static rendezvous on 127.0.0.1 and a fixed port rather than --standalone: where localhost

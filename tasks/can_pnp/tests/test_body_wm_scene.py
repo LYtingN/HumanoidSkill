@@ -34,6 +34,13 @@ def test_state_poses_and_observation_match_the_env():
         assert ((q * q_env).sum(-1).abs() > 1 - 1e-5).all()
     t = robot.body_names.index("torso_link")
     torch.testing.assert_close(poses["torso_pos"], robot.data.body_link_pos_w[:, t] - origin, atol=1e-4, rtol=0)
+    # The object world model's keypoints (pelvis, ankles, gripper bases) as the simulator has them.
+    from hskill.embodiment.g1_aloha import KEYPOINT_BODIES
+
+    kp = kin.keypoints(s)
+    ids = [robot.body_names.index(b) for b in KEYPOINT_BODIES]
+    torch.testing.assert_close(kp[..., :3], robot.data.body_link_pos_w[:, ids] - origin[:, None], atol=1e-4, rtol=0)
+    assert ((kp[..., 3:] * robot.data.body_link_quat_w[:, ids]).sum(-1).abs() > 1 - 1e-5).all()
     # The newest frame of the policy history is the analytic observation of the state.
     last = unflatten_history(obs["policy"])[-1]
     rebuilt = analytic_observation(s, last[:, -29:], body.context(), body.default_joint_pos)

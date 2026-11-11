@@ -6,8 +6,8 @@
 
 Reads each accepted attempt (``RTX_VIDEO_QA.json`` passed) of the MuJoCo collection: the
 physical trajectory (``trajectory.npz``), its layout (``trajectory.json``) and the joint
-layout of its model (``scene.xml``). For the first frame of the REACH and CLOSE phases it
-stores the robot root pose, the named joint positions, both can poses and the gripper
+layout of its model (``scene.xml``). For the first frame of every phase in ``PHASES`` (the
+reach and grasp, and the later ones the reverse curriculum starts from) it stores the robot root pose, the named joint positions, both can poses and the gripper
 openings, keyed by the LeRobot ``episode_index``. Needs only numpy.
 """
 
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-PHASES = ("REACH", "CLOSE")
+PHASES = ("REACH", "CLOSE", "LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE")
 QPOS_SIZE = {"free": 7, "ball": 4, "hinge": 1, "slide": 1}
 
 

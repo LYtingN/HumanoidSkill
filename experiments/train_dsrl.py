@@ -10,14 +10,15 @@ Policy: :class:`hskill.s1.noise_policy.NoisePolicy` chooses the DDIM initial noi
 policy at every replan (8 control steps); the SuperMimic tracker executes the reference.
 
 GRPO: every iteration each env group restarts from one recorded grasp start (all envs of a
-group from the same state), rolls out ``episode_s`` seconds and gets one episodic return:
-``success_reward`` once the task is done (the can rests released and upright in the box for
-``success_hold_s``), otherwise ``exp(-d / dist_scale)`` of the can's distance ``d`` to the
-placement goal at the end of the episode, 0 if it ended with a fall or a dropped can. The return
-is a function of the final state only (a potential-based shaping summed over the episode
-telescopes to it), so neither lingering near the goal nor a pass close to it before backing off
-or crashing is worth anything; the distance term keeps returns within a group distinct before
-any episode succeeds. Advantages are the returns normalized within each group; every noise
+group from the same state), rolls out ``episode_s`` seconds and gets one episodic return, the
+undiscounted sum of the task's rewards (``can_pnp.task_spec``: a terminal reward plus a
+potential-based shaping) up to the shaping of the shared start: ``success_reward`` once the task
+is done (the can rests released and upright in the box for ``success_hold_s``), 0 if the episode
+ended with a fall or a dropped can, otherwise the two-scale shaping
+``sum_i w_i exp(-d / scale_i)`` of the can's distance ``d`` to the placement goal at its end.
+The return is a function of the final state only, so neither lingering near the goal nor a pass
+close to it before backing off or crashing is worth anything; the shaping keeps returns within a
+group distinct before any episode succeeds, also far from the goal (the 0.5 m scale). Advantages are the returns normalized within each group; every noise
 decision of an episode shares it. The update is PPO-clip on the noise log-likelihood, plus
 ``kl_coef`` x KL to N(0, I), which keeps the noise near the base policy's distribution.
 Groups whose returns are all equal carry no signal and get zero advantage.
@@ -58,9 +59,10 @@ class Args:
     episode_s: float = 14.0
     grasp_phase: Literal["REACH", "CLOSE"] = "CLOSE"
     can_mass: float = 0.1
-    # Returns: success_reward, else exp(-final can-goal distance / dist_scale) (0 after a fall / drop).
+    # Returns: success_reward, else sum_i w_i exp(-final can-goal distance / scale_i) (0 after a fall / drop).
     success_reward: float = 10.0
-    dist_scale: float = 0.1  # m
+    dist_scales: tuple[float, ...] = (0.1, 0.5)  # m
+    dist_weights: tuple[float, ...] = (0.5, 0.5)
     # Done: can in the box, upright (axis within acos(upright_cos) of vertical) and the right
     # gripper commanded open (> release_opening), all for success_hold_s.
     success_hold_s: float = 0.2

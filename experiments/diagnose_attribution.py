@@ -3,15 +3,18 @@
 For every failed episode of the noise policy (e.g. DSRL's), the object world model replays the
 moments around the failure twice from the simulated can state:
 
-- actual branch: the simulated right-hand path (what S0 did);
-- ideal branch: the same body with the arms at the reference's joints (what an exact arm tracker
-  would have done; recorded during the rollout as ``ref_grip``).
+- actual branch: the simulated keypoints (what S0 did);
+- ideal branch: the reference executed exactly (``ideal_branch``: the whole body, or only the
+  arms on the actual body; recorded during the rollout as ``ref_kp``).
+
+Both replays give the object WM the same kind of history (the ``wm_history`` frames before the
+window) and differ in the future keypoints; windows longer than the WM's horizon are chained.
 
 A dropped can whose actual replay loses the can but whose ideal replay keeps it is an execution
 loss (S0's); one that loses the can in both is an intent loss (S1's); one the actual replay does
 not reproduce is unattributed (model miss), and one where the ensemble disagrees on the ideal
 replay is uncertain. Successful episodes give the false-alarm rates of both replays at random
-held moments. No Phi: the hands are the simulator's, so only the object WM is a model here.
+held moments. No Phi: the keypoints are the simulator's, so only the object WM is a model here.
 
     torchrun ... -m experiments.diagnose_attribution --tracker-checkpoint <supermimic>.pt \\
       --diffusion-checkpoint <dp>/best.pt --init-noise-checkpoint <dsrl>/last.pt --out-dir logs/attr/<run>
@@ -36,11 +39,13 @@ import tyro
 from hskill.data.buffer import TIME_MAJOR, EpisodeBuffer
 from hskill.data.episodes import Episodes
 from hskill.executors.imagine import PhiStep
+from hskill.embodiment.g1_aloha import RIGHT_EEF
 from hskill.interaction.model import (
     ObjectWMCfg,
     ObjectWMEnsemble,
     load_object_wm,
     object_loss,
+    object_targets,
     quat_exp,
     quat_log,
 )
@@ -99,6 +104,13 @@ def smooth_seams(ref: torch.Tensor, k: int) -> torch.Tensor:
     return out
 
 
+def _move(obj: torch.Tensor, frm: torch.Tensor, to: torch.Tensor) -> torch.Tensor:
+    """Object records (..., >= 10) carried rigidly from hand poses ``frm`` to ``to`` (..., 7)."""
+    turn = quat_mul(to[..., 3:], quat_inv(frm[..., 3:]))
+    pos = to[..., :3] + quat_apply(to[..., 3:], quat_apply_inverse(frm[..., 3:], obj[..., :3] - frm[..., :3]))
+    return torch.cat([pos, quat_mul(turn, obj[..., 3:7]), quat_apply(turn, obj[..., 7:10]), obj[..., 10:]], dim=-1)
+
+
 class Judge:
     """Outcome of a replay window: the task's own placement test (in the box, upright, released,
     for its hold time), entering the box, losing the can (no longer held, slipped in the gripper
@@ -109,7 +121,7 @@ class Judge:
 
     def __call__(self, obj: torch.Tensor, hands: torch.Tensor, held_p: torch.Tensor, released: torch.Tensor,
                  e: torch.Tensor, ep: Episodes, n: torch.Tensor) -> dict[str, torch.Tensor]:  # fmt: skip
-        """obj (W + 1, M, 14), hands (W + 1, M, 7), held_p (W + 1, M) in [0, 1], released (W, M)."""
+        """obj (W + 1, M, >= 7), hands (W + 1, M, 7), held_p (W + 1, M) in [0, 1], released (W, M)."""
         task, W, m = self.ro.task, obj.shape[0] - 1, torch.arange(obj.shape[1], device=obj.device)
         tracker = self.ro.task_tracker(task, self.ro.geo, ep.box[n], ep.goal[n], torch.zeros(len(n), device=obj.device),
                                        obj[0, :, :3], self.dt)  # fmt: skip
@@ -127,9 +139,9 @@ class Judge:
 @torch.no_grad()
 def replay(ep: Episodes, anchor: torch.Tensor, object_wm: ObjectWMEnsemble, judge: Judge, args: Args) -> dict:
     """Actual / ideal replays and the simulated truth of the window around ``anchor`` (N,)."""
-    device = ep.grip.device
-    T, N = ep.command.shape
-    W = args.pre + args.post
+    device = ep.kp.device
+    T, N = ep.command.shape[:2]
+    W, L = args.pre + args.post, object_wm.cfg.history
     n = torch.arange(N, device=device)
     t0 = (anchor - args.pre).clamp(min=0)
     # Judged at the window end, or at the episode's end where the env was reset after it (failures);
@@ -137,38 +149,44 @@ def replay(ep: Episodes, anchor: torch.Tensor, object_wm: ObjectWMEnsemble, judg
     last = torch.where(ep.placed, torch.full_like(ep.end_step, T), ep.end_step)
     e = (last - t0).clamp(min=1, max=W)
     t = (t0[None] + torch.arange(W + 1, device=device)[:, None]).clamp(max=T)  # (W + 1, N)
-    grip = _gather(ep.grip, t, n)
-    ideal = _gather(smooth_seams(ep.ref_grip, ep.execute_steps) if args.smooth_seams else ep.ref_grip, t, n)
-    command = _gather(ep.command, t[:-1].clamp(max=T - 1), n)
-    released = command > judge.ro.task.release_opening
-    obj0 = ep.obj[t0, n]
-    # The ideal branch starts on the reference's hand: a can held at t0 sits in that hand as it sits
-    # in the actual one (had the arm tracked exactly, it would have carried the can there). Starting
-    # it on the actual hand instead makes the hand jump by the tracking error in the first step,
-    # which the object WM reads as a jerk that shakes the can loose.
+    h = (t0[None] + torch.arange(1 - L, 1, device=device)[:, None]).clamp(min=0)  # (L, N) the history
+    ref = ep.ref_kp
+    if args.smooth_seams:
+        ref = ref.clone()
+        for i in range(ref.shape[2]):  # every keypoint: the whole reference jumps at a replan
+            ref[:, :, i] = smooth_seams(ep.ref_kp[:, :, i], ep.execute_steps)
+    kp, ideal_kp = _gather(ep.kp, t, n), _gather(ref, t, n)  # (W + 1, N, 5, 7)
+    command = _gather(ep.command, t[:-1].clamp(max=T - 1), n)  # (W, N, 2)
+    released = command[..., 1] > judge.ro.task.release_opening
+    width = _gather(ep.width, t, n)
+    hist_kp, hist_width, hist_obj = _gather(ep.kp, h, n), _gather(ep.width, h, n), _gather(ep.obj, h, n)[..., :10]
+    # The ideal branch's history is on the reference's hand: a can held at t0 sits in that hand as it
+    # sits in the actual one (had the arm tracked exactly, it would have carried the can there).
+    # Starting it on the actual hand instead makes the hand jump by the tracking error in the first
+    # step, which the object WM reads as a jerk that shakes the can loose. A free can keeps the
+    # measured history.
     held0 = (ep.held & ep.alive)[t0, n]
-    g_pos, g_quat, i_pos, i_quat = grip[0, :, :3], grip[0, :, 3:], ideal[0, :, :3], ideal[0, :, 3:]
-    turn = quat_mul(i_quat, quat_inv(g_quat))
-    moved = torch.cat([i_pos + quat_apply(i_quat, quat_apply_inverse(g_quat, obj0[:, :3] - g_pos)), quat_mul(turn, obj0[:, 3:7]),
-                       quat_apply(turn, obj0[:, 7:10]), quat_apply(turn, obj0[:, 10:13]), obj0[:, 13:]], dim=-1)  # fmt: skip
-    obj0_ideal = torch.where(held0[:, None], moved, obj0)
-    ideal[0] = torch.where(held0[:, None], ideal[0], grip[0])  # a free can: from the measured hand
+    ideal_hist_kp = torch.where(held0[None, :, None, None], _gather(ref, h, n), hist_kp)
+    moved = _move(hist_obj, hist_kp[:, :, RIGHT_EEF], ideal_hist_kp[:, :, RIGHT_EEF])
+    ideal_hist_obj = torch.where(held0[None, :, None], moved, hist_obj)
+    branches = {"actual": (hist_kp, hist_obj, kp[1:]), "ideal": (ideal_hist_kp, ideal_hist_obj, ideal_kp[1:])}
+    hands = {name: torch.cat([hk[-1:, :, RIGHT_EEF], fk[:, :, RIGHT_EEF]]) for name, (hk, _, fk) in branches.items()}
     out = {}
-    for name, hands, start in (("actual", grip, obj0), ("ideal", ideal, obj0_ideal)):
-        objs, logits = object_wm.rollout_all(start, hands, command, ep.box, ep.table)
+    for name, (hk, ho, fk) in branches.items():
+        objs, logits = object_wm.rollout_all(hk, hist_width, ho, fk, command, width[1:])
         held_p = torch.cat([torch.ones_like(logits[0, :1]), torch.sigmoid(logits).mean(0)])  # (W + 1, N)
-        res = judge(ObjectWMEnsemble.mean(objs), hands, held_p, released, e, ep, n)
+        res = judge(ObjectWMEnsemble.mean(objs), hands[name], held_p, released, e, ep, n)
         res["spread"] = objs[:, e, n, :3].std(0).norm(dim=-1)
         out.update({f"{name}_{k}": v for k, v in res.items()})
     held = (ep.held & ep.alive).float()
-    truth = judge(_gather(ep.obj, t, n), grip, _gather(held, t, n), released, e, ep, n)
+    truth = judge(_gather(ep.obj, t, n), hands["actual"], _gather(held, t, n), released, e, ep, n)
     out.update({f"true_{k}": v for k, v in truth.items()})
     in_window = torch.arange(W + 1, device=device)[:, None] <= e[None]
-    track = torch.where(in_window, (ideal[..., :3] - grip[..., :3]).norm(dim=-1), 0)
+    track = torch.where(in_window, (hands["ideal"][..., :3] - hands["actual"][..., :3]).norm(dim=-1), 0)
     out["track_max"] = track.amax(0)
     # Largest per-step hand motion in the window (a jerky ideal path would explain ideal losses).
-    for name, hands in (("actual", grip), ("ideal", ideal)):
-        step = torch.where(in_window[1:], (hands[1:, :, :3] - hands[:-1, :, :3]).norm(dim=-1), 0)
+    for name, path in hands.items():
+        step = torch.where(in_window[1:], (path[1:, :, :3] - path[:-1, :, :3]).norm(dim=-1), 0)
         out[f"{name}_step_max"] = step.amax(0)
     return out
 
@@ -176,8 +194,8 @@ def replay(ep: Episodes, anchor: torch.Tensor, object_wm: ObjectWMEnsemble, judg
 @torch.no_grad()
 def attribute(ep: Episodes, object_wm: ObjectWMEnsemble, judge: Judge, args: Args, gen: torch.Generator) -> dict:
     """Per-episode replays of one rollout (policy envs only)."""
-    device = ep.grip.device
-    T, N = ep.command.shape
+    device = ep.kp.device
+    T, N = ep.command.shape[:2]
     steps = torch.arange(T + 1, device=device)[:, None]
     held = ep.held & ep.alive
     last_held = torch.where(held, steps, -1).amax(0)  # (N,)
@@ -198,7 +216,7 @@ def attribute(ep: Episodes, object_wm: ObjectWMEnsemble, judge: Judge, args: Arg
     out = {
         "placed": placed, "dropped": dropped, "fallen": fallen, "timeout": timeout, "never_held": last_held < 0,
         "held_at_end": held_at_end, "end": end,
-        "ever_commanded_release": ((ep.command > judge.ro.task.release_opening) & ep.alive[1:]).any(0),
+        "ever_commanded_release": ((ep.command[..., 1] > judge.ro.task.release_opening) & ep.alive[1:]).any(0),
         **main, **{f"control_{k}": v for k, v in control.items()},
     }  # fmt: skip
     policy = ~ep.base
@@ -284,7 +302,7 @@ def main(args: Args | None = None) -> None:
     body = BodyWorldModel(env, args.tracker_checkpoint, args.supermimic_repo)
     kin = BodyKinematics(env, body, compile=args.compile)
     phi = PhiStep(body, rollouts.tracker, compile=args.compile)
-    collector = SimCollector(rollouts, phi, kin, args.horizon, args.well_tracked)
+    collector = SimCollector(rollouts, phi, kin, args.horizon, args.well_tracked, args.wm_history, args.ideal_branch)
     diffusion = rollouts.diffusion
     noise_policy = NoisePolicy(diffusion.n_tokens, diffusion.n_emb, diffusion.horizon, diffusion.action_dim,
                                hidden=args.hidden, init_log_std=args.init_log_std).to(device)  # fmt: skip
@@ -307,31 +325,33 @@ def main(args: Args | None = None) -> None:
         state = torch.load(args.object_wm_checkpoint, map_location=device, weights_only=False)
         object_wm = load_object_wm(state, env.step_dt).to(device)
     else:
-        object_wm = ObjectWMEnsemble(ObjectWMCfg(hidden=args.wm_hidden, dt=env.step_dt), args.wm_ensemble).to(device)
+        cfg = ObjectWMCfg(history=args.wm_history, horizon=args.horizon, hidden=args.wm_hidden, dt=env.step_dt)
+        object_wm = ObjectWMEnsemble(cfg, args.wm_ensemble).to(device)
         if args.compile:
             object_wm.compile_step()
         optimizer = torch.optim.Adam(object_wm.parameters(), lr=args.wm_lr)
         ddp.broadcast(object_wm)
-        W = args.pre + args.post
-        buffer = EpisodeBuffer(args.wm_collections, 1.0, W)
+        H = args.horizon
+        buffer = EpisodeBuffer(args.wm_collections, 1.0, H, args.wm_history)
         E, size = object_wm.num_members, args.wm_batch
         matmul = torch.backends.cuda.matmul
         for c in range(args.wm_collections):
             ep, stats = collect()
             buffer.add(ep)
             log(f"WM collection {c}: success {stats['sim/success_rate']:.3f} drop {stats['sim/drop_rate']:.3f}")
-            prev, matmul.fp32_precision = matmul.fp32_precision, "tf32"
+            prev, matmul.allow_tf32 = matmul.allow_tf32, True
             object_wm.train()
             metrics = []
             for _ in range(args.wm_steps_per_collection):
                 b = buffer.windows(E * size, 0.0)  # real hands only, as in the replays
                 perm = torch.randperm(E * size, device=device)
                 b = {k: v[:, perm] if k in TIME_MAJOR else v[perm] for k, v in b.items()}
-                objs, logits = object_wm.rollout_members(b["obj"][0].view(E, size, -1), b["grip"].view(W + 1, E, size, -1),
-                                                         b["command"].view(W, E, size), b["box"].view(E, size, 3),
-                                                         b["table"].view(E, size, 3))  # fmt: skip
-                loss, m = object_loss(objs.transpose(0, 1).reshape(W + 1, E * size, -1),
-                                      logits.transpose(0, 1).reshape(W, E * size), b["obj"], b["held"], b["mask"])  # fmt: skip
+                inputs = [b[k].view(b[k].shape[0], E, size, *b[k].shape[2:])
+                          for k in ("hist_kp", "hist_width", "hist_obj", "fut_kp", "fut_cmd")]  # fmt: skip
+                objs, logits = object_wm.rollout_members(*inputs)
+                loss, m = object_loss(objs.transpose(0, 1).reshape(H + 1, E * size, -1),
+                                      logits.transpose(0, 1).reshape(H, E * size), object_targets(b["obj"], env.step_dt),
+                                      b["held"], b["mask"])  # fmt: skip
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 ddp.average_grads(object_wm)
@@ -341,7 +361,7 @@ def main(args: Args | None = None) -> None:
                 optimizer.step()
                 metrics.append({k: float(v) for k, v in m.items() if k in ("pos_err_cm_final", "held_acc")})
             object_wm.eval()
-            matmul.fp32_precision = prev
+            matmul.allow_tf32 = prev
             last = {k: round(sum(x[k] for x in metrics[-20:]) / len(metrics[-20:]), 3) for k in metrics[-1]} if metrics else {}
             log(f"WM after collection {c}: {last}")
         if ddp.rank == 0:

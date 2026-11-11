@@ -1,7 +1,8 @@
 """Start episodes from recorded states at the reach / grasp of the collected episodes.
 
 ``assets/grasp_starts.json`` (``scripts/extract_grasp_starts.py``) holds, per LeRobot
-``episode_index``, the first frame of the REACH and CLOSE phases of the MuJoCo collection:
+``episode_index``, the first frame of each phase of the MuJoCo collection (REACH, CLOSE and the
+later ones a reverse curriculum starts from: LIFT, TURN_WALK, PLACE_REACH, LOWER, RELEASE):
 robot root pose and joints, target / resident can poses, gripper openings and the table
 layout. :func:`apply_grasp_start` writes one of them into each given env (env frame +
 env origin), so the policy starts with the arm already at the can.
@@ -32,12 +33,18 @@ VAL_EPISODES = (3, 46, 50, 54, 79, 120, 135, 169, 171, 204, 221, 245)
 
 
 class GraspStarts:
-    def __init__(self, path: str | Path = GRASP_STARTS, phase: str = "CLOSE"):
+    """One row per (phase, episode): ``phase`` one phase name or several (rows phase-major,
+    ``phase_ids`` the index into ``phases`` per row)."""
+
+    def __init__(self, path: str | Path = GRASP_STARTS, phase: str | tuple[str, ...] = "CLOSE"):
         episodes = json.loads(Path(path).read_text())
-        self.episode_ids = sorted(int(k) for k in episodes)
         self.phase = phase
-        rows = [episodes[str(i)] for i in self.episode_ids]
-        frames = [row["phases"][phase] for row in rows]
+        self.phases = (phase,) if isinstance(phase, str) else tuple(phase)
+        ids = sorted(int(k) for k in episodes)
+        self.episode_ids = ids * len(self.phases)
+        self.phase_ids = torch.arange(len(self.phases)).repeat_interleave(len(ids))
+        rows = [episodes[str(i)] for i in ids] * len(self.phases)
+        frames = [episodes[str(i)]["phases"][p] for p in self.phases for i in ids]
         self.frame = torch.tensor([int(f["frame"]) for f in frames])  # episode frame of the start
 
         def stack(key: str) -> torch.Tensor:
