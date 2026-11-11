@@ -515,7 +515,7 @@ def main(args: Args | None = None) -> None:
         st = fresh.starts(args.critic_samples, policy_only=True)
         out = imaginer.chunk_return(st, st["noise"])
         feat = critic_features(body, out["s_end"], out["kp_end"], out["obj_end"], out["held_logit_end"], st["goal"],
-                               (1.0 - st["time"]) / st["step_frac"] * env.step_dt)  # fmt: skip
+                               ((1.0 - st["time"]) / st["step_frac"] - args.horizon).clamp(min=0) * env.step_dt)  # fmt: skip
         keep = feat.isfinite().all(-1) & st["final"].isfinite()
         return feat[keep], st["final"][keep]
 

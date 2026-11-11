@@ -109,7 +109,9 @@ class Imaginer:
         score, score_ideal = actual["final"], ideal["final"]
         value = torch.full_like(score, float("nan"))
         if self.critic is not None and self.critic_weight > 0:
-            t_left = (1.0 - start["time"]) / start["step_frac"] * self.dt  # seconds of the episode left
+            # Seconds of the episode left at the window's end, the state the critic values (as its
+            # training features: each state with its own time left).
+            t_left = ((1.0 - start["time"]) / start["step_frac"] - S).clamp(min=0) * self.dt
             value = self._value(start, body.states[S], actual_kp[S - 1], actual, t_left)
             value_ideal = self._value(start, end_ideal, self.kin.keypoints(end_ideal), ideal, t_left)
             if self.event_head is not None:  # the critic values the still-running share S_H

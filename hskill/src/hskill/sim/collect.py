@@ -454,7 +454,7 @@ class SimCollector:
             ideal_check |= _pair_check(true, pred, imagined["chunk_returns_ideal"], start_alive, track_err, task.placed, size, ok)
         critic_check = {} if critic is None else self._critic_check(
             critic, controller, source, task, obs, reset, alive, failed, start_alive, imagined, pred,
-            start["goal"], (steps - delay * k) * env.step_dt, delay * k + k, steps, group, on_ideal,
+            start["goal"], max(steps - delay * k - k, 0) * env.step_dt, delay * k + k, steps, group, on_ideal,
         )  # fmt: skip
         if self.executor is not None:
             for e in self.executor:
@@ -472,7 +472,7 @@ class SimCollector:
     def _critic_check(self, critic, controller, source, task, obs, reset, alive, failed, start_alive, imagined,
                       chunk_pred, goal, t_left: float, first: int, steps: int, group: int,
                       on_ideal: torch.Tensor) -> dict:  # fmt: skip
-        """``t_left``: seconds of the episode left at the decision."""
+        """``t_left``: seconds of the episode left at the chunk's end (the state the critic values)."""
         """Continue the candidates' episodes from the chunk's end on the noise policy (8-step replans,
         as collected) and compare their returns with the critic's prediction from the candidates'
         imagined windows, and with the imagined chunk return alone."""
