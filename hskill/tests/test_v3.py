@@ -182,3 +182,20 @@ def test_masked_group_advantages_ignore_dropped_members():
     assert adv[2] == 0 and adv[3] == 0 and adv[0] < 0 < adv[1]  # the outlier did not enter the stats
     assert informative.tolist() == [1.0, 0.0]  # one kept member: no signal
     assert (adv[4:] == 0).all()
+
+
+def test_gae_advantages_per_decision():
+    from hskill.learners.grpo import gae_advantages
+
+    # Env 0 ends after decision 2 (return 5); env 1 lives through all 4 decisions (return 1).
+    values = torch.tensor([[1.0, 0.0], [2.0, 0.5], [3.0, 1.0], [9.0, 2.0]])
+    live = torch.tensor([[True, True], [True, True], [True, True], [False, True]])
+    final = torch.tensor([5.0, 1.0])
+    adv, ret = gae_advantages(values, live, final, lam=1.0)  # Monte Carlo: return - V
+    torch.testing.assert_close(adv[:, 0], torch.tensor([4.0, 3.0, 2.0, 0.0]))
+    torch.testing.assert_close(ret[:, 0], torch.tensor([5.0, 5.0, 5.0, 0.0]))
+    torch.testing.assert_close(ret[:, 1], torch.ones(4))
+    adv, ret = gae_advantages(values, live, final, lam=0.0)  # one-step TD
+    torch.testing.assert_close(adv[:, 0], torch.tensor([1.0, 1.0, 2.0, 0.0]))
+    torch.testing.assert_close(adv[:, 1], torch.tensor([0.5, 0.5, 1.0, -1.0]))
+    torch.testing.assert_close(ret[:, 1], torch.tensor([0.5, 1.0, 2.0, 1.0]))

@@ -44,6 +44,13 @@ the candidates' episodes to their end (``rank/critic_*``). ``--no-imagine`` turn
 updates off: every cycle collects, the noise policy learns from the simulator only (sim GRPO) and
 the world models and the critic are only fitted and checked.
 
+With ``value`` the critic is instead the value of the simulated decision states: it learns from the
+features of the real state at every recorded decision of the policy envs, with TD(``gae_lambda``)
+targets (lambda-returns) instead of Monte-Carlo ones, and imagination scores a chunk's predicted
+end with it (short model rollout + learned value). ``advantage gae`` replaces the simulator's GRPO
+update (one normalized return per episode, shared by its decisions) with per-decision GAE
+advantages on that value, normalized over the batch.
+
 ``curriculum`` (grasp-start phases from easy to hard, e.g. RELEASE LOWER PLACE_REACH TURN_WALK LIFT
 CLOSE) is a reverse curriculum: collection groups start at the frontier phase (a
 ``curriculum_frontier`` share of them, the others on an easier phase already passed), and the
@@ -73,7 +80,7 @@ from hskill.executors.imagine import PhiStep
 from hskill.executors.imaginer import Imaginer
 from hskill.interaction.model import ObjectWMCfg, ObjectWMEnsemble, ObjectWorldModel, object_loss, object_targets
 from hskill.learners.critic import ModelCritic, critic_features
-from hskill.learners.grpo import Distributed, group_advantages, masked_group_advantages, update
+from hskill.learners.grpo import Distributed, gae_advantages, group_advantages, masked_group_advantages, update
 from hskill.s0.body_world_model import DEFAULT_REPO, BodyWorldModel
 from hskill.s0.kinematics import BodyKinematics
 from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
@@ -141,6 +148,12 @@ class Args:
     critic_lr: float = 3e-4
     critic_hidden: tuple[int, ...] = (512, 512, 512)
     critic_members: int = 3
+    # The critic as the value of the simulated decision states, TD(gae_lambda) targets (see above).
+    value: bool = False
+    # The simulator's update: "grpo" (group-normalized episode returns) or "gae" (per decision, on
+    # the value; GRPO until the critic's pool holds imag_critic_min_pool samples).
+    advantage: Literal["grpo", "gae"] = "grpo"
+    gae_lambda: float = 0.9
     # Weight of the critic in the imagined score (0: the chunk's outcome only; 1: the chunk end's
     # value by the critic), once its pool holds imag_critic_min_pool samples of the current object WM.
     imag_critic_weight: float = 1.0
@@ -250,6 +263,10 @@ def main(args: Args | None = None) -> None:
         object_wm.compile_step()
     wm_optimizer = torch.optim.Adam(object_wm.parameters(), lr=args.wm_lr)
     decoder = SteeredDiffusionSource(diffusion, noise_policy, bf16=args.bf16)
+    if (args.value or args.advantage == "gae") and not args.critic:
+        raise ValueError("--value and --advantage gae need --critic")
+    if args.advantage == "gae" and not args.value:
+        raise ValueError("--advantage gae needs the critic as the value (--value)")
     critic = ModelCritic(args.critic_hidden, args.critic_members).to(device)
     imaginer = Imaginer(decoder, phi, kin, object_wm, rollouts.task, rollouts.geo, args.horizon, args.imag_batch,
                         task_tracker=TaskTracker, ideal=args.ideal_branch, critic=critic if args.critic else None)  # fmt: skip
@@ -334,14 +351,22 @@ def main(args: Args | None = None) -> None:
         counts = ddp.sum(counts)
         return {f"curriculum/success_{name}": float(c[0] / c[1]) for name, c in zip(phases, counts) if c[1] > 0}
 
-    def sim_anchor(episodes) -> dict:
-        """One GRPO update on the policy groups' episode returns (DSRL's update)."""
-        returns = episodes.final_potential
-        adv, informative = group_advantages(returns, args.sim_group)
+    def sim_anchor(episodes, gae: torch.Tensor | None = None) -> dict:
+        """One update on the policy envs' episodes: GRPO on the groups' episode returns (DSRL's
+        update), or the per-decision ``gae`` advantages (D, N) normalized over all ranks' decisions."""
         mask = (episodes.decision_live & ~episodes.base[None]).float()
+        if gae is None:
+            adv, informative = group_advantages(episodes.final_potential, args.sim_group)
+            info = {"anchor/informative_groups": float(informative.mean())}
+        else:
+            s1, s2, count = ddp.sum(torch.stack([(gae * mask).sum(), (gae.square() * mask).sum(), mask.sum()]))
+            mean = s1 / count.clamp_min(1)
+            std = (s2 / count.clamp_min(1) - mean.square()).clamp_min(0).sqrt()
+            adv = (gae - mean) / (std + 1e-6) * mask
+            info = {"anchor/gae_mean": float(mean), "anchor/gae_std": float(std)}
         batch = {"cond": episodes.cond, "noise": episodes.noise, "log_prob": episodes.log_prob, "mask": mask}
         stats = update(noise_policy, optimizer, batch, adv, args, ddp)
-        return {"anchor/informative_groups": float(informative.mean()), **{f"anchor/{k}": float(v) for k, v in stats.items()}}
+        return info | {"anchor/gae": float(gae is not None)} | {f"anchor/{k}": float(v) for k, v in stats.items()}
 
     def wm_batch_loss(source: EpisodeBuffer, size: int, phi_fraction: float, ideal_fraction: float = 0.0,
                       exact_only: bool = False, phi_only: bool = False):  # fmt: skip
@@ -428,6 +453,28 @@ def main(args: Args | None = None) -> None:
                                (1.0 - st["time"]) / st["step_frac"] * env.step_dt)  # fmt: skip
         keep = feat.isfinite().all(-1) & st["final"].isfinite()
         return feat[keep], st["final"][keep]
+
+    @torch.no_grad()
+    def decision_features(episodes) -> torch.Tensor:
+        """(D, N, FEAT_DIM) the critic's features of the simulated state at each decision (the
+        measured held flag as a saturated logit, the seconds of the episode left)."""
+        D, n = episodes.s0.shape[:2]
+        t = torch.arange(D, device=device) * episodes.execute_steps
+        t_left = ((episodes.kp.shape[0] - 1 - t) * env.step_dt).float().repeat_interleave(n)
+        held = torch.where(episodes.held[t], 10.0, -10.0)
+        feat = critic_features(body, episodes.s0.flatten(0, 1), episodes.kp[t].flatten(0, 1), episodes.obj[t, ..., :13].flatten(0, 1),
+                               held.flatten(), episodes.goal.repeat(D, 1), t_left)  # fmt: skip
+        return feat.view(D, n, -1)
+
+    @torch.no_grad()
+    def value_targets(episodes) -> tuple[torch.Tensor, ...]:
+        """The policy envs' live decisions (D, N), their features, GAE advantages and lambda-returns
+        on the critic as the value."""
+        feat = decision_features(episodes)
+        live = episodes.decision_live & ~episodes.base[None] & feat.isfinite().all(-1)
+        values = critic(feat.flatten(0, 1)).mean(0).view(live.shape)
+        adv, ret = gae_advantages(values, live, episodes.final_potential, args.gae_lambda)
+        return live, feat, adv, ret
 
     @torch.no_grad()
     def critic_fresh(feat: torch.Tensor, target: torch.Tensor) -> dict:
@@ -531,14 +578,26 @@ def main(args: Args | None = None) -> None:
             episodes, sim_stats, env_phase = collect()
             sim_stats |= phase_success(episodes, env_phase)
             fresh = wm_fresh(episodes)
-            if args.critic and (samples := critic_samples(episodes)) is not None:
-                if pool:  # scored before it trains on them
-                    crit = critic_fresh(*samples)
-                pool.insert(0, samples)
+            # The value is trusted for the GAE update once trained on imag_critic_min_pool samples.
+            value_ready = sum(len(t) for _, t in pool) >= args.imag_critic_min_pool
+            gae = None
+            if args.critic and args.value:  # real decision states, lambda-return targets
+                live, feat, gae, ret = value_targets(episodes)
+                samples, mc = (feat[live], ret[live]), episodes.final_potential[None].expand_as(live)[live]
+                if not len(mc):
+                    samples = None
+            else:
+                samples = critic_samples(episodes) if args.critic else None
+                mc = None if samples is None else samples[1]
+            if samples is not None:
+                if pool:  # scored against the episodes' returns before it trains on them
+                    crit = critic_fresh(samples[0], mc)
+                pick = torch.randperm(len(mc), device=device)[: args.critic_samples]
+                pool.insert(0, (samples[0][pick], samples[1][pick]))
                 while sum(len(t) for _, t in pool) - len(pool[-1][1]) >= args.critic_pool:
                     pool.pop()
             if args.sim_anchor:
-                anchor = sim_anchor(episodes)
+                anchor = sim_anchor(episodes, gae if args.advantage == "gae" and value_ready else None)
             episodes.noise = episodes.log_prob = None  # only the anchor needs them
             if not args.imagine:  # imagination starts only (~3 GB per 2048-env rollout)
                 episodes.cond = episodes.obs0 = None

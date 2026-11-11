@@ -1,7 +1,7 @@
 """GRPO on the DDIM noise of the frozen diffusion policy (shared by sim and imagined rollouts).
 
 Advantages are returns normalized within each group of consecutive samples (zero for constant
-groups). The update is PPO-clip on the noise log-likelihood plus ``kl_coef`` x KL to N(0, I),
+groups), or per decision by GAE on a learned value (``gae_advantages``). The update is PPO-clip on the noise log-likelihood plus ``kl_coef`` x KL to N(0, I),
 with an early stop once an epoch's approx KL passes ``target_kl``. ``cfg`` is any object with
 ``epochs``, ``minibatches``, ``clip``, ``kl_coef``, ``target_kl`` and ``max_grad_norm``.
 """
@@ -72,13 +72,31 @@ def masked_group_advantages(scores: torch.Tensor, group_size: int, keep: torch.T
     return adv.flatten(), informative.flatten().float()
 
 
+def gae_advantages(values: torch.Tensor, live: torch.Tensor, final: torch.Tensor,
+                   lam: float) -> tuple[torch.Tensor, torch.Tensor]:  # fmt: skip
+    """GAE over an episode's decisions, undiscounted, whose only reward is its return ``final`` at
+    its end: delta_d = V(d + 1) - V(d), with ``final`` in place of V after the last live decision.
+
+    (D, N) values and live decisions, (N,) returns -> (D, N) advantages and lambda-returns (0 where
+    not live)."""
+    D = values.shape[0]
+    cont = torch.cat([live[1:], torch.zeros_like(live[:1])])  # the episode goes on to decision d + 1
+    nxt = torch.where(cont, torch.cat([values[1:], values[:1]]), final)
+    adv = torch.zeros_like(values)
+    run = torch.zeros_like(final)
+    for d in reversed(range(D)):
+        run = nxt[d] - values[d] + torch.where(cont[d], lam * run, 0)
+        adv[d] = torch.where(live[d], run, 0)
+    return adv, torch.where(live, adv + values, 0)
+
+
 def update(noise_policy: NoisePolicy, optimizer: torch.optim.Optimizer, batch: dict, adv: torch.Tensor,
            cfg, ddp: Distributed) -> dict:  # fmt: skip
     d, n = batch["mask"].shape
     cond = batch["cond"].flatten(0, 1)
     noise, old = batch["noise"].flatten(0, 1), batch["log_prob"].flatten(0, 1)
     mask = batch["mask"].flatten()
-    adv = adv[None].expand(d, n).flatten()
+    adv = (adv[None].expand(d, n) if adv.dim() == 1 else adv).flatten()  # per episode or per decision
     total = ddp.sum(mask.sum().clone()).clamp_min(1.0)
     stats = {"loss": 0.0, "approx_kl": 0.0, "clip_frac": 0.0, "kl_base": 0.0, "updates": 0, "skipped_steps": 0}
     stop = False
