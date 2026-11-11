@@ -37,7 +37,7 @@ class EpisodeBuffer:
     def add(self, episodes: Episodes) -> None:
         self.episodes.append(episodes)
         self.valid.append(episodes.decision_alive.nonzero())
-        self.valid_policy.append((episodes.decision_alive & ~episodes.base[None]).nonzero())
+        self.valid_policy.append((episodes.decision_alive & episodes.policy_envs()[None]).nonzero())
         if len(self.episodes) > self.capacity:
             self.episodes.pop(0)
             self.valid.pop(0)

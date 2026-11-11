@@ -61,10 +61,10 @@ def tracking_stats(ep: Episodes, placed: torch.Tensor, failed: torch.Tensor, pol
         "track/err_p95_cm": 100 * float(err[live].quantile(0.95)) if bool(live.any()) else float("nan"),
         "track/well_window_share": float((window[win_ok] < well).float().mean()) if bool(win_ok.any()) else float("nan"),
     }
-    if bool(lost.any()):
-        # Failures (not done) of the policy's episodes: arms tracked well throughout vs not.
-        stats["track/fail_well_tracked_share"] = float((ep_err[lost] < well).float().mean())
-        stats["track/fail_dropped_or_fell_share"] = float(failed[lost].float().mean())
+    # Failures (not done) of the policy's episodes: arms tracked well throughout vs not (NaN without
+    # any: every rank reports every key).
+    stats["track/fail_well_tracked_share"] = float((ep_err[lost] < well).float().mean()) if bool(lost.any()) else float("nan")
+    stats["track/fail_dropped_or_fell_share"] = float(failed[lost].float().mean()) if bool(lost.any()) else float("nan")
     return stats
 
 
@@ -200,14 +200,22 @@ class SimCollector:
 
     @torch.no_grad()
     def collect(self, noise_policy: NoisePolicy, rows: torch.Tensor, base_envs: torch.Tensor,
-                episode_s: float | None = None) -> tuple[Episodes, dict]:  # fmt: skip
+                episode_s: float | None = None, ideal_envs: torch.Tensor | None = None) -> tuple[Episodes, dict]:  # fmt: skip
         """One episode per env from grasp start ``rows``; ``base_envs`` (N,) take N(0, I) noise.
-        ``episode_s`` overrides ``args.episode_s`` (e.g. per curriculum phase)."""
+        ``episode_s`` overrides ``args.episode_s`` (e.g. per curriculum phase). ``ideal_envs`` (N,):
+        envs the ideal executor E* runs instead of S0 (``Episodes.ideal_env``)."""
         ro, env, body, kin, device = self.rollouts, self.env, self.body, self.kin, self.device
         args, n, H = ro.args, self.env.num_envs, self.horizon
         source = SteeredDiffusionSource(ro.diffusion, noise_policy, "sample", bf16=args.bf16)
         source.base_envs = base_envs
         controller = SuperMimicController(env, source, ro.tracker)
+        on_ideal = ideal_envs if ideal_envs is not None else torch.zeros(n, dtype=torch.bool, device=device)
+        if bool(on_ideal.any()):
+            if self.executor is None:
+                raise ValueError("ideal_envs needs the collector's ideal executor (ideal_executor=True)")
+            for e in self.executor:
+                e.attach(controller)
+                e.set_active(on_ideal.nonzero().flatten(), True)
         k = source.execute_steps
         steps = round((episode_s or args.episode_s) / env.step_dt)
         decisions = steps // k
@@ -286,6 +294,10 @@ class SimCollector:
             ref_kp[step + 1] = self.ideal_keypoints(controller, frames)
             alive &= ~(task.placed | task.toppled | terminated | nan)
         ro.render(True)
+        if bool(on_ideal.any()):
+            for e in self.executor:
+                e.set_active(on_ideal.nonzero().flatten(), False)
+                e.attach(None)
         cond, noise, log_prob = (_by_decision(decision_records, key, n) for key in ("cond", "noise", "log_prob"))
         decision_live = decision_alive.clone()
         # Windows running past the episode end are incomplete: never sampled.
@@ -301,12 +313,16 @@ class SimCollector:
             decision_alive=decision_alive, xi=xi, execute_steps=k, ref_kp=clean(ref_kp),
             noise=clean(noise), log_prob=clean(log_prob), decision_live=decision_live,
             end_step=alive_t.sum(0) - 1, placed=task.placed.clone(), dropped=dropped & ~task.placed,
-            fallen=(fallen | diverged) & ~task.placed, **ctx,
+            fallen=(fallen | diverged) & ~task.placed, ideal_env=on_ideal.clone(), **ctx,
         )  # fmt: skip
-        policy = ~base_envs
+        policy = episodes.policy_envs()
         stats = tracking_stats(episodes, task.placed, failed, policy, self.well_tracked)
-        for name, m in (("sim", policy), ("sim_base", base_envs)):
-            if bool(m.any()):
+        # Every key on every rank (NaN without envs): the ranks average them key by key.
+        for name, m in (("sim", policy), ("sim_base", base_envs), ("sim_ideal", on_ideal)):
+            if not bool(m.any()):
+                stats.update({f"{name}/{k}": float("nan") for k in ("return", "success_rate", "in_box_rate", "drop_rate",
+                                                                    "fall_rate", "final_dist", "held_rate")})  # fmt: skip
+            else:
                 stats.update({
                     f"{name}/return": float(task.potential(failed)[m].mean()),
                     f"{name}/success_rate": float(task.placed[m].float().mean()),

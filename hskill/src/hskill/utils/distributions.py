@@ -46,7 +46,7 @@ def _histogram(name: str, values: torch.Tensor) -> torch.Tensor:
 
 def episode_histograms(ep: Episodes, envs: torch.Tensor) -> dict[str, torch.Tensor]:
     """Counts of the distributions above over the envs of ``envs`` (N,) bool and the policy's envs."""
-    envs = envs & ~ep.base
+    envs = envs & ep.policy_envs()
     failed = (ep.dropped | ep.fallen) & ~ep.placed
     timeout = ~ep.placed & ~failed
     out = {"success": torch.stack([(envs & ep.placed).sum(), (envs & failed).sum(), (envs & timeout).sum()]).float()}
@@ -81,7 +81,7 @@ def layer_points(ep: Episodes, envs: torch.Tensor, rim: float, dt: float, every:
     Each comes with ``*_t``, the time since the episode start (its curriculum phase's start)."""
     from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
 
-    envs = envs & ~ep.base
+    envs = envs & ep.policy_envs()
     steps = torch.arange(0, ep.alive.shape[0], every, device=ep.alive.device)
     alive = ep.alive[steps] & envs[None]
     t = (steps.float() * dt)[:, None].expand_as(alive)

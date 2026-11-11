@@ -227,6 +227,11 @@ class Args:
     # rank/tau then ranks rank_group // 2 candidates per group.
     rank_ideal: bool = True
     ideal_kp_scale: float = 10.0  # E*'s joint stiffness x the actuators' (x3: 4 cm hand error, x30: 1 cm)
+    # Share of the collection groups (of the noise policy's) executed by E* throughout: their windows
+    # train the object WM on near-exact executions (the ideal branch's input, with its simulated
+    # outcome), and sim_ideal/* tells how the policy does when executed exactly; nothing of them
+    # trains the policy, the critic or counts for the curriculum.
+    ideal_collect_fraction: float = 0.0625
     tau_low: float = 0.3
     tau_high: float = 0.6
     tau_min: float = 0.2  # below it: no imagined updates, next cycle collects
@@ -273,7 +278,8 @@ def main(args: Args | None = None) -> None:
     if args.rank_ideal and args.rank_group % 2:
         raise ValueError("--rank-ideal pairs the candidates: --rank-group must be even")
     collector = SimCollector(rollouts, phi, kin, args.horizon, args.well_tracked, args.wm_history, args.ideal_branch,
-                             args.phi_env_fraction, ideal_executor=args.rank_ideal and bool(args.rank_every),
+                             args.phi_env_fraction,
+                             ideal_executor=(args.rank_ideal and bool(args.rank_every)) or args.ideal_collect_fraction > 0,
                              ideal_kp_scale=args.ideal_kp_scale)  # fmt: skip
     noise_policy = NoisePolicy(diffusion.n_tokens, diffusion.n_emb, diffusion.horizon, diffusion.action_dim,
                                hidden=args.hidden, init_log_std=args.init_log_std).to(device)  # fmt: skip
@@ -366,8 +372,10 @@ def main(args: Args | None = None) -> None:
             easy = torch.rand(groups, generator=rng) >= args.curriculum_frontier
             phase[easy] = torch.randint(level, (int(easy.sum()),), generator=rng)
         rows = sample_rows(groups, phase).repeat_interleave(args.sim_group)
-        base = (torch.rand(groups, generator=rng) < args.base_fraction).repeat_interleave(args.sim_group)
-        episodes, stats = collector.collect(noise_policy, rows, base.to(device), episode_seconds())
+        base = torch.rand(groups, generator=rng) < args.base_fraction
+        ideal = ~base & (torch.rand(groups, generator=rng) < args.ideal_collect_fraction)
+        base, ideal = base.repeat_interleave(args.sim_group), ideal.repeat_interleave(args.sim_group)
+        episodes, stats = collector.collect(noise_policy, rows, base.to(device), episode_seconds(), ideal.to(device))
         return episodes, stats, phase.repeat_interleave(args.sim_group).to(device)
 
     def episode_seconds() -> float:
@@ -376,7 +384,7 @@ def main(args: Args | None = None) -> None:
 
     def phase_success(episodes, env_phase: torch.Tensor) -> dict:
         """The noise policy's success rate per curriculum phase (over all ranks)."""
-        policy = ~episodes.base
+        policy = episodes.policy_envs()
         counts = torch.stack([torch.stack([(episodes.placed & policy & (env_phase == i)).sum(),
                                            (policy & (env_phase == i)).sum()]).float()
                               for i in range(len(phases))])  # fmt: skip
@@ -386,7 +394,7 @@ def main(args: Args | None = None) -> None:
     def sim_anchor(episodes, gae: torch.Tensor | None = None) -> dict:
         """One update on the policy envs' episodes: GRPO on the groups' episode returns (DSRL's
         update), or the per-decision ``gae`` advantages (D, N) normalized over all ranks' decisions."""
-        mask = (episodes.decision_live & ~episodes.base[None]).float()
+        mask = (episodes.decision_live & episodes.policy_envs()[None]).float()
         if gae is None:
             adv, informative = group_advantages(episodes.final_potential, args.sim_group)
             info = {"anchor/informative_groups": float(informative.mean())}
@@ -528,7 +536,7 @@ def main(args: Args | None = None) -> None:
         """The policy envs' live decisions (D, N), their features, GAE advantages and lambda-returns
         on the critic as the value."""
         feat = decision_features(episodes)
-        live = episodes.decision_live & ~episodes.base[None] & feat.isfinite().all(-1)
+        live = episodes.decision_live & episodes.policy_envs()[None] & feat.isfinite().all(-1)
         values = critic(feat.flatten(0, 1)).mean(0).view(live.shape)
         adv, ret = gae_advantages(values, live, episodes.final_potential, args.gae_lambda)
         return live, feat, adv, ret

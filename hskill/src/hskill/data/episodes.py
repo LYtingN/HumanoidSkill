@@ -43,3 +43,10 @@ class Episodes:
     placed: torch.Tensor | None = None  # (N,) bool
     dropped: torch.Tensor | None = None  # (N,) bool
     fallen: torch.Tensor | None = None  # (N,) bool (or diverged)
+    # (N,) bool: envs the simulated ideal executor E* ran (the reference executed nearly exactly).
+    # Their windows train the object WM (its ideal branch's input), nothing of the policy's.
+    ideal_env: torch.Tensor | None = None
+
+    def policy_envs(self) -> torch.Tensor:
+        """(N,) the envs the noise policy ran with S0: neither on N(0, I) noise nor executed by E*."""
+        return ~self.base & (~self.ideal_env if self.ideal_env is not None else True)
