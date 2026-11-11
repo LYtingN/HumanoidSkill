@@ -8,7 +8,8 @@ for a ``phi_fraction`` of them, Phi's (the input the model sees at imagination t
 ``ideal_fraction`` of the exactly executed windows (right-hand tracking error below ``well_tracked``
 throughout) the ideal branch's (the reference executed exactly: there the simulated can is what
 that ideal input brings about, so the model also learns the ideal branch's kind of input); the
-labels are always the simulated can. Frames before an episode's start repeat its first frame. :meth:`starts` gives imagination starts and, on the noise
+labels are always the simulated can, and ``fail`` / ``done`` mark the step each episode ended
+dropping or toppling the can / placing it (the event head's labels). Frames before an episode's start repeat its first frame. :meth:`starts` gives imagination starts and, on the noise
 policy's envs only, the critic's samples.
 """
 
@@ -20,7 +21,7 @@ from hskill.data.episodes import Episodes
 from hskill.embodiment.g1_aloha import RIGHT_EEF
 
 # (time, sample, ...) window fields
-TIME_MAJOR = ("hist_kp", "hist_width", "hist_obj", "fut_kp", "fut_cmd", "obj", "held", "mask")
+TIME_MAJOR = ("hist_kp", "hist_width", "hist_obj", "fut_kp", "fut_cmd", "obj", "held", "mask", "fail", "done")
 
 
 class EpisodeBuffer:
@@ -91,9 +92,14 @@ class EpisodeBuffer:
                 fut_kp = torch.where(ideal[None, :, None, None], ep.ref_kp[t[1:], e], fut_kp)
                 if exact_only:
                     mask = mask & exact[None]
+            # The step each episode ended, and how (none of them: a time-out or a fall).
+            last = t[1:] == (ep.end_step[e] if ep.end_step is not None else torch.full_like(e, -1))[None]
+            fail = last & (ep.dropped[e] if ep.dropped is not None else torch.zeros_like(phi))[None]
+            done = last & (ep.placed[e] if ep.placed is not None else torch.zeros_like(phi))[None]
             parts.append({
                 **self._history(ep, d, e), "fut_kp": fut_kp, "fut_cmd": ep.command[t[:-1].clamp(max=T - 1), e],
                 "obj": ep.obj[t, e], "held": ep.held[t[1:], e], "mask": mask, "ideal": ideal,
+                "fail": fail & mask, "done": done & mask, "box": ep.box[e],
             })  # fmt: skip
         return {k: torch.cat([p[k] for p in parts], dim=1 if k in TIME_MAJOR else 0) for k in parts[0]}
 

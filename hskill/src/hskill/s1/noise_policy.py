@@ -77,8 +77,17 @@ class SteeredDiffusionSource:
     @torch.no_grad()
     def predict(self, rows: torch.Tensor, images: torch.Tensor, states: torch.Tensor):
         diffusion = self.policy
+        # The encoder and the sampler run on one of a few batch sizes (N / 8, N / 4, N / 2, N rows,
+        # the extra rows repeating the first): compiled for static shapes, a varying count of
+        # replanning rows (envs whose episode is over do not replan) costs no recompiles and no
+        # slower dynamic-shape kernels.
+        index = rows.nonzero().flatten() if rows.dtype == torch.bool else rows
+        m, total = len(index), images.shape[0]
+        size = next((b for b in (-(-total // 8), -(-total // 4), -(-total // 2)) if m <= b), max(m, total))
+        padded = torch.cat([index, index[:1].expand(size - m)])
         with torch.autocast("cuda", torch.bfloat16, enabled=self.bf16):
-            cond = diffusion.encode(diffusion._prepare_image(images[rows]), states[rows])
+            cond_all = diffusion.encode(diffusion._prepare_image(images[padded]), states[padded])
+        cond = cond_all[:m]
         mean, log_std = self.noise_policy(cond)
         if self.mode == "sample":
             w = mean + torch.exp(log_std) * torch.randn_like(mean)
@@ -95,7 +104,8 @@ class SteeredDiffusionSource:
                 "rows": rows.clone(), "cond": cond.to(torch.bfloat16), "noise": w,
                 "log_prob": NoisePolicy.log_prob(w, mean, log_std),
             })  # fmt: skip
-        return self.decode(cond, w)
+        out = self.decode(cond_all, torch.cat([w, w.new_zeros(size - m, w.shape[1])]))
+        return tuple(x[:m] for x in out)
 
     @torch.no_grad()
     def decode(self, cond: torch.Tensor, w: torch.Tensor):

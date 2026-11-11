@@ -21,10 +21,14 @@ noise policy (``hskill.s1.noise_policy.NoisePolicy``) and the object world model
    ``rollback_margin`` below the best one restores that policy;
 2. object WM: ``wm_steps`` steps on windows of ``wm_history`` past and ``horizon`` future frames,
    the future keypoints simulated or (for ``phi_fraction`` of them) Phi's, labels always the
-   simulated can;
-3. ranking check (every ``rank_every`` cycles): candidates from identical sim states executed in
-   sim vs imagined (``rank/tau``), and the ideal branch against the candidates S0 executed
-   exactly (``rank/ideal_*``, ``rank/gap_*``); below ``tau_min`` the cycle skips imagination and the
+   simulated can; with ``events`` the event head (continue / fail / done per step, read off the WM's
+   prediction) on the same batches, which then scores the imagination with probabilities;
+3. ranking check (every ``rank_every`` cycles): candidates from identical sim states, each executed
+   for one chunk (``execute_steps``, up to the next replan) in sim vs imagined over the same steps
+   (``rank/tau``), and the ideal branch against the candidates S0 executed exactly
+   (``rank/ideal_*``, ``rank/gap_*``); with ``rank_ideal`` each candidate is also executed by the
+   simulated ideal executor E*, the ideal branch's ground truth (``rank/sim_*``: J* simulated vs
+   imagined, ``rank/episode_gap``: the episode's J* - J of one decision); below ``tau_min`` the cycle skips imagination and the
    next one collects (the imagined ranking is no better than chance); a low tau halves the
    imagined iterations per sim rollout, a high tau doubles them, within
    [``imag_iters_min``, ``imag_iters_max``];
@@ -71,6 +75,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import tyro
@@ -78,6 +83,7 @@ from can_pnp.task_spec import TaskTracker
 from hskill.data.buffer import TIME_MAJOR, EpisodeBuffer
 from hskill.executors.imagine import PhiStep
 from hskill.executors.imaginer import Imaginer
+from hskill.interaction.events import EventHead, event_loss
 from hskill.interaction.model import ObjectWMCfg, ObjectWMEnsemble, ObjectWorldModel, object_loss, object_targets
 from hskill.learners.critic import ModelCritic, critic_features
 from hskill.learners.grpo import Distributed, gae_advantages, group_advantages, masked_group_advantages, update
@@ -86,6 +92,7 @@ from hskill.s0.kinematics import BodyKinematics
 from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
 from hskill.sim.collect import SimCollector
 from hskill.sim.rollouts import Rollouts
+from hskill.utils import distributions
 
 from experiments._task_setup import rollout_dependencies
 
@@ -129,6 +136,13 @@ class Args:
     wm_warmup_rollouts: int = 2
     wm_warmup_steps: int = 2000
     wm_steps: int = 200
+    # Event head (hskill.interaction.events): the imagination scores the probabilities it reads off the
+    # object WM's prediction (S_H, P_done) instead of thresholds on predicted states, once it has had
+    # event_min_steps updates (trained on each WM batch, the WM's predictions as its input).
+    events: bool = True
+    event_hidden: tuple[int, ...] = (256, 256)
+    event_lr: float = 3e-4
+    event_min_steps: int = 500
     phi_fraction: float = 0.5
     phi_env_fraction: float = 1.0  # share of the collection envs Phi runs windows for (the Phi-body inputs)
     # Share of the exactly executed windows (right hand within well_tracked) given the ideal branch's
@@ -208,6 +222,11 @@ class Args:
     rank_every: int = 1
     rank_group: int = 8
     rank_max_delay: int = 6  # decisions on shared noise before the candidates
+    # Pair the ranking check's candidates: each also executed by the simulated ideal executor E*
+    # (hskill.executors.ideal_body), the ideal branch's ground truth (rank/sim_*, rank/episode_gap);
+    # rank/tau then ranks rank_group // 2 candidates per group.
+    rank_ideal: bool = True
+    ideal_kp_scale: float = 10.0  # E*'s joint stiffness x the actuators' (x3: 4 cm hand error, x30: 1 cm)
     tau_low: float = 0.3
     tau_high: float = 0.6
     tau_min: float = 0.2  # below it: no imagined updates, next cycle collects
@@ -251,8 +270,11 @@ def main(args: Args | None = None) -> None:
     body = BodyWorldModel(env, args.tracker_checkpoint, args.supermimic_repo)
     kin = BodyKinematics(env, body, compile=args.compile)
     phi = PhiStep(body, rollouts.tracker, compile=args.compile)
+    if args.rank_ideal and args.rank_group % 2:
+        raise ValueError("--rank-ideal pairs the candidates: --rank-group must be even")
     collector = SimCollector(rollouts, phi, kin, args.horizon, args.well_tracked, args.wm_history, args.ideal_branch,
-                             args.phi_env_fraction)  # fmt: skip
+                             args.phi_env_fraction, ideal_executor=args.rank_ideal and bool(args.rank_every),
+                             ideal_kp_scale=args.ideal_kp_scale)  # fmt: skip
     noise_policy = NoisePolicy(diffusion.n_tokens, diffusion.n_emb, diffusion.horizon, diffusion.action_dim,
                                hidden=args.hidden, init_log_std=args.init_log_std).to(device)  # fmt: skip
     optimizer = torch.optim.Adam(noise_policy.parameters(), lr=args.lr)
@@ -262,6 +284,10 @@ def main(args: Args | None = None) -> None:
     if args.compile:
         object_wm.compile_step()
     wm_optimizer = torch.optim.Adam(object_wm.parameters(), lr=args.wm_lr)
+    event_head = EventHead(args.event_hidden).to(device)
+    event_optimizer = torch.optim.Adam(event_head.parameters(), lr=args.event_lr)
+    event_steps = 0
+    rim = rollouts.geo.box_bottom_z + rollouts.geo.upper_box_size[2]
     decoder = SteeredDiffusionSource(diffusion, noise_policy, bf16=args.bf16)
     if (args.value or args.advantage == "gae") and not args.critic:
         raise ValueError("--value and --advantage gae need --critic")
@@ -294,6 +320,10 @@ def main(args: Args | None = None) -> None:
         if "critic" in state:
             critic.load_state_dict(state["critic"])
             critic_optimizer.load_state_dict(state["critic_optimizer"])
+        if "event_head" in state:
+            event_head.load_state_dict(state["event_head"])
+            event_optimizer.load_state_dict(state["event_optimizer"])
+            event_steps = state["event_steps"]
         args.cycle_kl = state.get("cycle_kl", args.cycle_kl)
     elif args.init_noise_checkpoint is not None:
         # Not its optimizer: Adam's second moments of the large sim batches would blow up the
@@ -303,11 +333,13 @@ def main(args: Args | None = None) -> None:
     ddp.broadcast(noise_policy)
     ddp.broadcast(object_wm)
     ddp.broadcast(critic)
-    log = None
+    log = dists_log = None
     if ddp.rank == 0:
         args.out_dir.mkdir(parents=True, exist_ok=True)
         (args.out_dir / "args.json").write_text(json.dumps(asdict(args), default=str, indent=2))
         log = (args.out_dir / "metrics.jsonl").open("a")
+        # Per-collection histograms (success / S1 / S0 at the frontier; tools/plot_distributions.py).
+        dists_log = (args.out_dir / "dists.jsonl").open("a")
         print(f"v3: {ddp.world} GPU x {args.num_envs} sim envs, imagination {args.imag_starts} x {args.imag_group}",
               flush=True)  # fmt: skip
     rng = torch.Generator().manual_seed(args.seed + 7919 * ddp.rank)
@@ -369,16 +401,17 @@ def main(args: Args | None = None) -> None:
         return info | {"anchor/gae": float(gae is not None)} | {f"anchor/{k}": float(v) for k, v in stats.items()}
 
     def wm_batch_loss(source: EpisodeBuffer, size: int, phi_fraction: float, ideal_fraction: float = 0.0,
-                      exact_only: bool = False, phi_only: bool = False):  # fmt: skip
+                      exact_only: bool = False, phi_only: bool = False, windows: bool = False):  # fmt: skip
         b = source.windows(size, phi_fraction, ideal_fraction, args.well_tracked, exact_only, phi_only)
         pred, logits = object_wm.rollout(b["hist_kp"], b["hist_width"], b["hist_obj"], b["fut_kp"], b["fut_cmd"])
-        return object_loss(pred, logits, object_targets(b["obj"], env.step_dt), b["held"], b["mask"])
+        loss, m = object_loss(pred, logits, object_targets(b["obj"], env.step_dt), b["held"], b["mask"])
+        return (loss, m, pred, b) if windows else (loss, m)
 
     def wm_members_loss(size: int):
         """Every ensemble member on its own batch (one stacked rollout): the members' spread then
         reflects the data's coverage."""
         if not isinstance(object_wm, ObjectWMEnsemble):
-            return wm_batch_loss(buffer, size, args.phi_fraction, args.wm_ideal_fraction)
+            return wm_batch_loss(buffer, size, args.phi_fraction, args.wm_ideal_fraction, windows=True)
         E = object_wm.num_members
         b = buffer.windows(E * size, args.phi_fraction, args.wm_ideal_fraction, args.well_tracked)
         H = b["fut_cmd"].shape[0]
@@ -391,7 +424,23 @@ def main(args: Args | None = None) -> None:
         pred = objs.transpose(0, 1).reshape(H + 1, E * size, -1)
         loss, m = object_loss(pred, logits.transpose(0, 1).reshape(H, E * size), object_targets(b["obj"], env.step_dt),
                               b["held"], b["mask"])  # fmt: skip
-        return loss, {**m, "ideal_share": b["ideal"].float().mean()}
+        return loss, {**m, "ideal_share": b["ideal"].float().mean()}, pred, b
+
+    def train_events(pred: torch.Tensor, b: dict) -> dict:
+        """One event-head step on a WM batch: the WM's (detached) predictions in, the episodes' ends as labels."""
+        nonlocal event_steps
+        event_head.train()
+        logits = event_head(*EventHead.window_inputs(pred.detach(), b["hist_kp"], b["fut_kp"], b["fut_cmd"]), b["box"], rim)
+        loss, m = event_loss(logits, b["fail"], b["done"], b["mask"])
+        event_optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        ddp.average_grads(event_head)
+        grad = torch.nn.utils.clip_grad_norm_(event_head.parameters(), 10.0)
+        if not bool(ddp.sum((~(loss.isfinite() & grad.isfinite())).float().reshape(1)) > 0):
+            event_optimizer.step()
+            event_steps += 1
+        event_head.eval()
+        return m
 
     @contextlib.contextmanager
     def tf32():
@@ -409,8 +458,11 @@ def main(args: Args | None = None) -> None:
     def train_wm(steps: int) -> dict:
         object_wm.train()
         metrics = []
+        events = []
         for _ in range(steps):
-            loss, m = wm_members_loss(args.wm_batch)
+            loss, m, pred, b = wm_members_loss(args.wm_batch)
+            if args.events:
+                events.append(train_events(pred, b))
             wm_optimizer.zero_grad(set_to_none=True)
             loss.backward()
             ddp.average_grads(object_wm)
@@ -420,7 +472,12 @@ def main(args: Args | None = None) -> None:
             wm_optimizer.step()
             metrics.append({"loss": loss.detach(), **m})
         object_wm.eval()
-        return {f"wm/{k}": v for k, v in _mean(metrics[-20:]).items()}
+        if args.events:  # the imagination scores with the head once it has trained enough
+            imaginer.event_head = event_head if event_steps >= args.event_min_steps else None
+        return ({f"wm/{k}": v for k, v in _mean(metrics[-20:]).items()}
+                | {f"event/{k}": v for k, v in _mean(events[-20:]).items()}
+                | ({"event/steps": float(event_steps), "event/scoring": float(imaginer.event_head is not None)}
+                   if args.events else {}))  # fmt: skip
 
     @torch.no_grad()
     def wm_fresh(episodes) -> dict:
@@ -577,6 +634,21 @@ def main(args: Args | None = None) -> None:
             since_collect, force_collect = 0, False
             episodes, sim_stats, env_phase = collect()
             sim_stats |= phase_success(episodes, env_phase)
+            counts = distributions.episode_histograms(episodes, env_phase == level)
+            counts = {k: ddp.sum(v) for k, v in counts.items()}
+            if dists_log is not None:
+                dists_log.write(json.dumps(distributions.record(cycle, level, counts)) + "\n")
+                dists_log.flush()
+                # Rank 0's frontier episodes: where each layer puts the can (tools/plot_layers.py).
+                geo = rollouts.geo
+                points = distributions.layer_points(episodes, env_phase == level, geo.box_bottom_z + geo.upper_box_size[2],
+                                                    rollouts.env.step_dt)  # fmt: skip
+                (args.out_dir / "layers").mkdir(exist_ok=True)
+                np.savez_compressed(
+                    args.out_dir / "layers" / f"{cycle:06d}.npz", cycle=cycle, phase=phases[level],
+                    episode_s=episode_seconds(), outcomes=counts["success"].cpu().numpy(),
+                    **{k: v.cpu().numpy().astype(np.float16) for k, v in points.items()},
+                )  # fmt: skip
             fresh = wm_fresh(episodes)
             # The value is trusted for the GAE update once trained on imag_critic_min_pool samples.
             value_ready = sum(len(t) for _, t in pool) >= args.imag_critic_min_pool
@@ -639,7 +711,7 @@ def main(args: Args | None = None) -> None:
             rows = sample_rows(g, torch.full((g,), level))
             delay = int(torch.randint(args.rank_max_delay + 1, (1,), generator=rng))
             rank = collector.ranking(noise_policy, imaginer, rows, args.rank_group, delay, critic if args.critic else None,
-                                     episode_seconds(), args.uncertainty_max)  # fmt: skip
+                                     episode_seconds(), args.uncertainty_max, ideal_pairs=args.rank_ideal)  # fmt: skip
             rank = _all_mean(rank, ddp, device)
             tau = rank["rank/tau"]
             if math.isnan(tau) or tau < args.tau_min:
@@ -681,7 +753,8 @@ def main(args: Args | None = None) -> None:
                 "noise_policy": noise_policy.state_dict(), "optimizer": optimizer.state_dict(),
                 "object_wm": object_wm.state_dict(), "wm_optimizer": wm_optimizer.state_dict(),
                 "critic": critic.state_dict(), "critic_optimizer": critic_optimizer.state_dict(),
-                "cycle": cycle, "imag_iters": imag_iters, "cycle_kl": args.cycle_kl, "args": asdict(args),
+                "event_head": event_head.state_dict(), "event_optimizer": event_optimizer.state_dict(),
+                "event_steps": event_steps, "cycle": cycle, "imag_iters": imag_iters, "cycle_kl": args.cycle_kl, "args": asdict(args),
                 "curriculum_level": level,
                 "diffusion_checkpoint": str(args.diffusion_checkpoint),
                 "tracker_checkpoint": str(args.tracker_checkpoint),

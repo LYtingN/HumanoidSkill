@@ -38,6 +38,7 @@ import torch
 
 from hskill.embodiment import g1_aloha as C
 from hskill.executors.imagine import PhiStep, imagine_body, reference_frames
+from hskill.interaction.events import EventHead, soft_outcome
 from hskill.interaction.model import ObjectWMEnsemble, ObjectWorldModel
 from hskill.learners.critic import critic_features
 from hskill.s0.controller import reference_plan
@@ -63,19 +64,26 @@ class Imaginer:
         self.horizon, self.batch = horizon, batch
         self.task_tracker = task_tracker
         self.critic, self.critic_weight = critic, critic_weight
+        # hskill.interaction.events.EventHead: once set, scores are expected returns from its event
+        # probabilities (S_H, P_done) instead of the task tracker's thresholds on the predicted can.
+        self.event_head = None
+        self.rim = geo.box_bottom_z + geo.upper_box_size[2]
         env = self.body.env
         self.legs = LegKinematics(env.sim.mj_model, C.BODY_JOINT_NAMES, env.device, prefix="robot/")
         self.dt = env.step_dt
 
     @torch.no_grad()
-    def chunk_return(self, start: dict[str, torch.Tensor], noise: torch.Tensor) -> dict[str, torch.Tensor]:
-        """``start`` fields (B, ...) as ``EpisodeBuffer.starts``, ``noise`` (B, dim)."""
-        outs = [self._chunk({k: v[i : i + self.batch] for k, v in start.items()}, noise[i : i + self.batch])
+    def chunk_return(self, start: dict[str, torch.Tensor], noise: torch.Tensor, steps: int | None = None) -> dict[str, torch.Tensor]:
+        """``start`` fields (B, ...) as ``EpisodeBuffer.starts``, ``noise`` (B, dim). ``steps``: score
+        the first ``steps`` frames of the horizon only (the steps a chunk executes before the next
+        replan, as the simulated ranking check runs them); the prediction still sees the whole plan."""
+        outs = [self._chunk({k: v[i : i + self.batch] for k, v in start.items()}, noise[i : i + self.batch], steps)
                 for i in range(0, len(noise), self.batch)]  # fmt: skip
         return {k: torch.cat([o[k] for o in outs]) for k in outs[0]}
 
-    def _chunk(self, start: dict[str, torch.Tensor], noise: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _chunk(self, start: dict[str, torch.Tensor], noise: torch.Tensor, steps: int | None = None) -> dict[str, torch.Tensor]:
         H = self.horizon
+        S = steps or H
         joint_pos, grip, rot6d = self.source.decode(start["cond"], noise)
         s0 = start["s0"]
         n = len(s0)
@@ -89,23 +97,28 @@ class Imaginer:
         # (state k is reference frame k - 1, the target of control step k - 1): the whole body, or
         # Phi's body with the reference's arm joints.
         actual_kp = self.kin.keypoints(body.states[1:])
-        actual = self._score(start, actual_kp, command)
+        actual = self._score(start, actual_kp, command, S)
         if self.ideal == "full":
             ideal_states = reference_frames(plan, s0, H)
         else:
             ideal_states = body.states[1:].clone()
             ideal_states[..., ARM_STATE] = plan.joint_pos[:, :H, ARM_JOINTS].transpose(0, 1)
-        ideal = self._score(start, self.kin.keypoints(ideal_states), command)
+        ideal = self._score(start, self.kin.keypoints(ideal_states), command, S)
         potential0 = actual["phi0"]  # the task's shaping at the start (the same for both branches)
-        end_ideal = ideal_states[-1]
+        end_ideal = ideal_states[S - 1]
         score, score_ideal = actual["final"], ideal["final"]
         value = torch.full_like(score, float("nan"))
         if self.critic is not None and self.critic_weight > 0:
             t_left = (1.0 - start["time"]) / start["step_frac"] * self.dt  # seconds of the episode left
-            value = self._value(start, body.states[-1], actual_kp[-1], actual, t_left)
+            value = self._value(start, body.states[S], actual_kp[S - 1], actual, t_left)
             value_ideal = self._value(start, end_ideal, self.kin.keypoints(end_ideal), ideal, t_left)
-            score = score + self.critic_weight * (value - score)
-            score_ideal = score_ideal + self.critic_weight * (value_ideal - score_ideal)
+            if self.event_head is not None:  # the critic values the still-running share S_H
+                score, score_ideal = (b["p_done"] * self.task.success_reward
+                                      + b["survive"] * (b["phi_end"] + self.critic_weight * (v - b["phi_end"]))
+                                      for b, v in ((actual, value), (ideal, value_ideal)))  # fmt: skip
+            else:
+                score = score + self.critic_weight * (value - score)
+                score_ideal = score_ideal + self.critic_weight * (value_ideal - score_ideal)
         return {
             "returns": score - potential0, "returns_ideal": score_ideal - potential0, "value": value,
             # Chunk outcomes, comparable with a simulated chunk (equal to the returns while no
@@ -113,8 +126,8 @@ class Imaginer:
             "chunk_returns": actual["chunk"] - potential0, "chunk_returns_ideal": ideal["chunk"] - potential0,
             "potential0": potential0, "uncertainty": actual["spread"],
             "uncertainty_ideal": ideal["spread"], "placed": actual["placed"], "dropped": actual["dropped"],
-            "final_dist": actual["final_dist"], "final_pos": actual["final_pos"], "fall_prob": body.fall_prob[-1],
-            "s_end": body.states[-1], "kp_end": actual_kp[-1], "obj_end": actual["obj_end"],
+            "final_dist": actual["final_dist"], "final_pos": actual["final_pos"], "fall_prob": body.fall_prob[S],
+            "s_end": body.states[S], "kp_end": actual_kp[S - 1], "obj_end": actual["obj_end"],
             "held_logit_end": actual["held_logit_end"],
         }  # fmt: skip
 
@@ -123,14 +136,20 @@ class Imaginer:
         dropped), else the critic's members' mean, within [0, success_reward]."""
         feat = critic_features(self.body, s_end, kp_end, branch["obj_end"], branch["held_logit_end"], start["goal"], t_left)
         v = self.critic(feat).mean(0).clamp(0.0, self.task.success_reward)
+        if self.event_head is not None:  # the event probabilities weigh it (see _chunk)
+            return v
         return torch.where(branch["placed"] | branch["dropped"], branch["final"], v)
 
-    def _score(self, start: dict[str, torch.Tensor], fut_kp: torch.Tensor, command: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _score(self, start: dict[str, torch.Tensor], fut_kp: torch.Tensor, command: torch.Tensor,
+               steps: int | None = None) -> dict[str, torch.Tensor]:  # fmt: skip
         """Predict the object from the start's history and the future keypoints ``fut_kp``
-        (H, B, 5, 7) with the commanded openings (H, B, 2), and score it with the task tracker."""
-        H, task, n = self.horizon, self.task, fut_kp.shape[1]
+        (H, B, 5, 7) with the commanded openings (H, B, 2), and score its first ``steps`` frames
+        (default: all) with the task tracker."""
+        task, n = self.task, fut_kp.shape[1]
         hist = [start[k].transpose(0, 1) for k in ("hist_kp", "hist_width", "hist_obj")]  # time-major
         all_objs, all_logits = self.object_wm.rollout_all(*hist, fut_kp, command)
+        H = steps or fut_kp.shape[0]
+        all_objs, all_logits, fut_kp, command = all_objs[:, : H + 1], all_logits[:, :H], fut_kp[:H], command[:H]
         objs, spread = ObjectWMEnsemble.mean(all_objs), ObjectWMEnsemble.spread(all_objs)
         zeros = torch.zeros(n, device=fut_kp.device)
         tracker = self.task_tracker(task, self.geo, start["box"], start["goal"], zeros, start["obj0"][:, :3], self.dt)
@@ -141,9 +160,21 @@ class Imaginer:
             pos, quat = objs[k, :, :3], objs[k, :, 3:7]
             drop = alive & (pos[:, 2] < task.drop_height)
             dropped |= drop
-            tracker.step(pos, quat, command[k - 1, :, 1] > task.release_opening, alive & ~drop)
-            alive &= ~(tracker.placed | drop)
+            held = all_logits[:, k - 1].mean(0) > 0
+            tracker.step(pos, quat, command[k - 1, :, 1] > task.release_opening, alive & ~drop, held)
+            dropped |= alive & tracker.toppled  # a toppled can fails like a dropped one
+            alive &= ~(tracker.placed | tracker.toppled | drop)
         final = tracker.potential(dropped)
-        return {"final": final, "chunk": final, "phi0": phi0, "spread": spread, "placed": tracker.placed, "dropped": dropped,
-                "final_dist": tracker.final_dist, "final_pos": objs[-1, :, :3], "obj_end": objs[-1],
-                "held_logit_end": all_logits.mean(0)[-1]}  # fmt: skip
+        out = {"final": final, "chunk": final, "phi0": phi0, "spread": spread, "placed": tracker.placed, "dropped": dropped,
+               "final_dist": tracker.final_dist, "final_pos": objs[-1, :, :3], "obj_end": objs[-1],
+               "held_logit_end": all_logits.mean(0)[-1]}  # fmt: skip
+        if self.event_head is not None:
+            # Expected return: done with P_done, still running with S_H at the can's phi, failed (0) else.
+            hist_kp = start["hist_kp"].transpose(0, 1)
+            logits = self.event_head(*EventHead.window_inputs(objs, hist_kp, fut_kp, command), start["box"], self.rim)
+            soft = soft_outcome(logits)
+            # phi of the predicted can at the window's end (a tracker started there).
+            phi_end = self.task_tracker(task, self.geo, start["box"], start["goal"], zeros, objs[-1, :, :3], self.dt).shaping()
+            final = soft["p_done"] * task.success_reward + soft["survive"] * phi_end
+            out |= {"final": final, "chunk": final, "phi_end": phi_end, **soft}
+        return out

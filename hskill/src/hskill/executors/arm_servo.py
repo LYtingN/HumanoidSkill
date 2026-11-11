@@ -45,6 +45,7 @@ class ArmServo:
         joints: tuple[str, ...] = ARM_JOINT_NAMES,
         feedforward: bool = True,
     ):
+        # ``controller`` may be None, attached later (``attach``): until then nothing is servoed.
         self.env, self.controller = env, controller
         self.mask = mask.to(env.device, dtype=torch.bool)
         self.term = env.action_manager.get_term("joint_pos")
@@ -69,18 +70,31 @@ class ArmServo:
         kp = sim.get_default_field("actuator_gainprm")[self.ctrl_ids, 0]
         kd = -sim.get_default_field("actuator_biasprm")[self.ctrl_ids, 2]
         force = sim.get_default_field("actuator_forcerange")[self.ctrl_ids]
-        self.kp, self.kd = kp * kp_scale, kd * math.sqrt(kp_scale)
-        envs = self.mask.nonzero().flatten()
-        rows, cols = envs[:, None], self.ctrl_ids
-        model = sim.model
-        model.actuator_gainprm[rows, cols, 0] = self.kp
-        model.actuator_biasprm[rows, cols, 1] = -self.kp
-        model.actuator_biasprm[rows, cols, 2] = -self.kd
-        model.actuator_forcerange[rows, cols] = force * effort_scale
+        self.default = (kp, kd, force)
+        self.kp, self.kd, self.force = kp * kp_scale, kd * math.sqrt(kp_scale), force * effort_scale
+        self.set_active(self.mask.nonzero().flatten(), True)
         self.lead = self.kd / self.kp if feedforward else torch.zeros_like(self.kp)
 
         self._process = self.term.process_actions
         self.term.process_actions = self._process_actions
+
+    def attach(self, controller: SuperMimicController | None) -> None:
+        """Servo the plans of ``controller`` (None: none)."""
+        self.controller = controller
+        self.active = controller is not None and bool(self.mask.any())
+
+    def set_active(self, envs: torch.Tensor, active: bool) -> None:
+        """Hand the arms of ``envs`` to the stiff servo (``active``) or back to the tracker with the
+        actuators' own gains (e.g. to switch executors mid-episode)."""
+        kp, kd, force = (self.kp, self.kd, self.force) if active else self.default
+        rows, cols = envs[:, None], self.ctrl_ids
+        model = self.env.sim.model
+        model.actuator_gainprm[rows, cols, 0] = kp
+        model.actuator_biasprm[rows, cols, 1] = -kp
+        model.actuator_biasprm[rows, cols, 2] = -kd
+        model.actuator_forcerange[rows, cols] = force
+        self.mask[envs] = active
+        self.active = self.controller is not None and bool(self.mask.any())
 
     def reference(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Arm joint position / velocity (N, J) of the reference frame this step servos to."""
@@ -93,6 +107,8 @@ class ArmServo:
 
     def _process_actions(self, actions: torch.Tensor) -> None:
         self._process(actions)
+        if not self.active:  # no env servoed (or no controller yet): the tracker's targets stand
+            return
         q, qd = self.reference()
         target = q + self.lead * qd
         processed = self.term._processed_actions
@@ -104,5 +120,5 @@ class ArmServo:
         return (q - self.reference()[0]).square().mean(-1).sqrt()
 
     def close(self) -> None:
-        """Restore the action term (gains stay: rebuild the env for plain S0 everywhere)."""
+        """Restore the action term (gains stay: ``set_active(envs, False)`` restores them)."""
         self.term.process_actions = self._process

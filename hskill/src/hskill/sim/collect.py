@@ -68,9 +68,47 @@ def tracking_stats(ep: Episodes, placed: torch.Tensor, failed: torch.Tensor, pol
     return stats
 
 
+def _by_decision(records: list[dict | None], key: str, n: int) -> torch.Tensor:
+    """(D, n, ...) of a field of the per-decision source records, which hold only the rows that
+    replanned (``rows``); zeros elsewhere (envs whose episode was over: not decision_alive)."""
+    ref = next(r[key] for r in records if r is not None)
+    out = torch.zeros(len(records), n, *ref.shape[1:], dtype=ref.dtype, device=ref.device)
+    for d, r in enumerate(records):
+        if r is not None:
+            out[d, r["rows"]] = r[key]
+    return out
+
+
+def _pair_check(true, pred, pred_ideal, start_alive, track_err, placed, size, ok) -> dict[str, float]:
+    """Envs 2j (S0) and 2j + 1 (E*) executed the same candidate: the simulated J* (the E* env's chunk
+    return) against the ideal branch's prediction, and the simulated gap J* - J against the imagined one."""
+    s0, ideal = slice(0, None, 2), slice(1, None, 2)
+    both = start_alive[s0] & start_alive[ideal]
+    sim_gap, imag_gap = true[ideal] - true[s0], pred_ideal[s0] - pred[s0]
+
+    def mean(x):
+        return float(x[both].mean()) if bool(both.any()) else float("nan")
+
+    corr = float("nan")
+    if int(both.sum()) > 2:
+        a, b = sim_gap[both] - sim_gap[both].mean(), imag_gap[both] - imag_gap[both].mean()
+        corr = float((a * b).sum() / (a.norm() * b.norm()).clamp(min=1e-9))
+    tau = kendall_tau(pred_ideal[s0].view(-1, size), true[ideal].view(-1, size))
+    keep = ok & tau.isfinite()
+    return {
+        "rank/sim_ideal_mae": mean((pred_ideal[s0] - true[ideal]).abs()), "rank/sim_ideal_return": mean(true[ideal]),
+        "rank/sim_gap": mean(sim_gap), "rank/sim_gap_pos_share": mean((sim_gap > 0.05).float()),
+        "rank/imag_gap": mean(imag_gap), "rank/gap_corr": corr,
+        "rank/ideal_tau": float(tau[keep].mean()) if bool(keep.any()) else float("nan"),
+        "rank/sim_ideal_placed": mean(placed[ideal].float()), "rank/sim_placed": mean(placed[s0].float()),
+        "rank/ideal_exec_err_cm": 100 * mean(track_err[ideal]),
+    }  # fmt: skip
+
+
 class SimCollector:
     def __init__(self, rollouts: Rollouts, phi: PhiStep, kin: BodyKinematics, horizon: int = 32,
-                 well_tracked: float = 0.02, history: int = 10, ideal: str = "full", phi_env_fraction: float = 1.0):  # fmt: skip
+                 well_tracked: float = 0.02, history: int = 10, ideal: str = "full", phi_env_fraction: float = 1.0,
+                 ideal_executor: bool = False, ideal_kp_scale: float = 10.0):  # fmt: skip
         if ideal not in ("full", "arms"):
             raise ValueError(f"ideal must be 'full' or 'arms', got {ideal!r}")
         self.rollouts, self.phi, self.body, self.kin, self.horizon = rollouts, phi, phi.body, kin, horizon
@@ -90,6 +128,14 @@ class SimCollector:
         self.torso = robot.body_names.index("torso_link")
         self.gripper_ids = robot.find_joints(C.GRIPPER_JOINT_NAMES, preserve_order=True)[0]
         self.fingers = [env.scene[f"finger_{s}_can_contacts"] for s in ("l", "r")]
+        # The simulated ideal executor E* (hskill.executors.ideal_body: every body joint on a stiff
+        # servo, the root held by a PD wrench), hooked into the env now and idle until a ranking check
+        # pairs candidates (``ranking(ideal_pairs=True)``): the ideal branch's ground truth.
+        self.executor = None
+        if ideal_executor:
+            from hskill.executors.ideal_body import ideal_executor as make
+
+            self.executor = make(env, None, torch.zeros(env.num_envs, dtype=torch.bool, device=self.device), ideal_kp_scale)
 
     # ------------------------------------------------------------------ simulator state
 
@@ -195,7 +241,10 @@ class SimCollector:
         alive = torch.ones(n, dtype=torch.bool, device=device)
         fallen, dropped, diverged = (torch.zeros(n, dtype=torch.bool, device=device) for _ in range(3))
         envs = torch.arange(n, device=device)
+        decision_records: list[dict | None] = [None] * decisions  # the source's record of each decision
         for step in range(steps):
+            # Envs whose episode is over keep replaying their last plan: no encoding, no sampling.
+            controller.frozen = ~alive
             if step % k == 0 and step // k < decisions:
                 d = step // k
                 state = body.state()
@@ -204,9 +253,12 @@ class SimCollector:
                 win_s[slot], win_hist[:, slot] = state[pe], unflatten_history(obs["policy"])[:, pe]
                 win_d[slot], win_k[slot] = d, 0
                 phi_kp[d, 0] = kp[step]
+            records_before = len(source.records)
             action = controller.act(obs, reset)
             reset = torch.zeros_like(reset)
-            if step % k == 0:  # every env replanned (no resets inside a rollout)
+            if step % k == 0 and step // k < decisions and len(source.records) > records_before:
+                decision_records[step // k] = source.records[-1]
+            if step % k == 0:  # every env replanned (no resets inside a rollout; ended ones replay)
                 frames = self.ideal_frames(controller, s0[step // k] if step // k < decisions else body.state())
             command[step] = controller.plan_gripper[envs, controller.step_in_chunk - 1]
             # Phi: every open window takes the step on the goal the simulated tracker just got.
@@ -226,17 +278,15 @@ class SimCollector:
             dropped |= drop
             diverged |= nan
             live = alive & ~terminated & ~nan
-            o = self.object_state()
-            task.step(o[:, :3], o[:, 3:7], released, live)
+            o, holds = self.object_state(), self.held()
+            task.step(o[:, :3], o[:, 3:7], released, live, holds)
+            dropped |= live & task.toppled  # a toppled can ends the episode like a dropped one
             kp[step + 1], width[step + 1], obj[step + 1] = self.keypoints(), self.widths(), o
-            held[step + 1], alive_t[step + 1] = self.held(), live
+            held[step + 1], alive_t[step + 1] = holds, live
             ref_kp[step + 1] = self.ideal_keypoints(controller, frames)
-            alive &= ~(task.placed | terminated | nan)
+            alive &= ~(task.placed | task.toppled | terminated | nan)
         ro.render(True)
-        records = source.records
-        cond = torch.stack([r["cond"] for r in records[:decisions]])
-        noise = torch.stack([r["noise"] for r in records[:decisions]])
-        log_prob = torch.stack([r["log_prob"] for r in records[:decisions]])
+        cond, noise, log_prob = (_by_decision(decision_records, key, n) for key in ("cond", "noise", "log_prob"))
         decision_live = decision_alive.clone()
         # Windows running past the episode end are incomplete: never sampled.
         complete = torch.arange(decisions, device=device) * k + H <= steps
@@ -273,18 +323,30 @@ class SimCollector:
 
     @torch.no_grad()
     def ranking(self, noise_policy: NoisePolicy, imaginer, rows: torch.Tensor, group: int, delay: int,
-                critic=None, episode_s: float | None = None, uncertainty_max: float | None = None) -> dict:  # fmt: skip
+                critic=None, episode_s: float | None = None, uncertainty_max: float | None = None,
+                ideal_pairs: bool = False) -> dict:  # fmt: skip
         """Groups of ``group`` envs from grasp start ``rows`` (G,) share noise for ``delay``
-        decisions, then try one candidate reference each for the whole chunk (and with a
-        ``critic``, continue on the noise policy to the episode's end)."""
+        decisions, then try one candidate reference each for one executed chunk (the steps up to the
+        next replan, as collected; the imagination scores the same steps), and with a ``critic``
+        continue on the noise policy to the episode's end.
+
+        ``ideal_pairs``: envs 2j and 2j + 1 try the same candidate, 2j with S0 and 2j + 1 with the
+        simulated ideal executor E* (back to S0 after the chunk): each candidate's simulated J*
+        next to its J, for the chunk and (with a ``critic``) for the episode. The ranking statistics
+        then use the S0 envs only (``group // 2`` candidates per group)."""
         ro, env, body, device = self.rollouts, self.env, self.body, self.device
-        n, H = env.num_envs, self.horizon
-        if n % group:
-            raise ValueError(f"{n} envs do not split into groups of {group}")
+        n = env.num_envs
+        if n % group or (ideal_pairs and group % 2):
+            raise ValueError(f"{n} envs do not split into groups of {group}" + (" pairs" if ideal_pairs else ""))
+        if ideal_pairs and self.executor is None:
+            raise ValueError("ideal_pairs needs the collector's ideal executor (ideal_executor=True)")
         source = SteeredDiffusionSource(ro.diffusion, noise_policy, "sample", bf16=ro.args.bf16)
         source.tie = group
         controller = SuperMimicController(env, source, ro.tracker)
         k = source.execute_steps
+        if self.executor is not None:
+            for e in self.executor:
+                e.attach(controller)
         obs = ro.start(rows.repeat_interleave(group))
         reset = torch.ones(n, dtype=torch.bool, device=device)
         alive = torch.ones(n, dtype=torch.bool, device=device)
@@ -307,24 +369,27 @@ class SimCollector:
         g = obj0[:, :3].view(-1, group, 3)
         grip = self.keypoints()[:, C.RIGHT_EEF, :3].view(-1, group, 3)
         spread = torch.maximum((g - g[:, :1]).norm(dim=-1).amax(1), (grip - grip[:, :1]).norm(dim=-1).amax(1))
-        source.tie = 1
-        controller.execute_steps = H
+        source.tie = 2 if ideal_pairs else 1
         controller.step_in_chunk[:] = 0
+        envs = torch.arange(n, device=device)
+        on_ideal = (envs % 2 == 1) if ideal_pairs else torch.zeros(n, dtype=torch.bool, device=device)
+        if ideal_pairs:
+            for e in self.executor:
+                e.set_active(on_ideal.nonzero().flatten(), True)
         task = self._task()
         phi0 = task.shaping()  # the task's shaping at the decision
         start_alive = alive.clone()
         failed = torch.zeros(n, dtype=torch.bool, device=device)
-        envs = torch.arange(n, device=device)
         track_err = torch.zeros(n, device=device)
         ro.render(False)
-        for step in range(H):
+        for step in range(k):
             action = controller.act(obs, reset)
             reset = torch.zeros_like(reset)
             if step == 0:  # the candidates' plans, made from the decision state
                 frames = self.ideal_frames(controller, state)
             released = controller.plan_gripper[envs, controller.step_in_chunk - 1, 1] > ro.task.release_opening
             if critic is not None:  # the images of the replan after the chunk
-                ro.render(step >= H - 2)
+                ro.render(step >= k - 2)
             obs, _, terminated, _, _ = env.step(action)
             ideal = self.ideal_keypoints(controller, frames)
             hand_err = (ideal[:, C.RIGHT_EEF, :3] - self.keypoints()[:, C.RIGHT_EEF, :3]).norm(dim=-1)
@@ -333,52 +398,64 @@ class SimCollector:
             failed |= fell | drop | nan
             live = alive & ~terminated & ~nan
             o = self.object_state()
-            task.step(o[:, :3], o[:, 3:7], released, live)
-            alive &= ~(task.placed | terminated | nan)
+            task.step(o[:, :3], o[:, 3:7], released, live, self.held())
+            failed |= live & task.toppled
+            alive &= ~(task.placed | task.toppled | terminated | nan)
         ro.render(True)
+        if ideal_pairs:  # back to S0 for the rest of the episode
+            for e in self.executor:
+                e.set_active(on_ideal.nonzero().flatten(), False)
         record = source.records[-1]
         start["cond"] = record["cond"]
         true = task.potential(failed) - phi0
-        imagined = imaginer.chunk_return(start, record["noise"])
+        imagined = imaginer.chunk_return(start, record["noise"], k)
         # The simulator only sees the chunk: compare the imagined chunk outcomes (object WM on Phi's
-        # hands), not the critic's estimate of the episode beyond it.
+        # hands), not the critic's estimate of the episode beyond it. Ranked: the S0 envs.
+        s0 = ~on_ideal
+        size = group // 2 if ideal_pairs else group  # candidates per group
         pred = imagined["chunk_returns"]
-        tau = kendall_tau(pred.view(-1, group), true.view(-1, group))
+        tau = kendall_tau(pred[s0].view(-1, size), true[s0].view(-1, size))
         # Groups that broke up before the decision, or whose candidates all score the same, carry no ranking.
         ok = start_alive.view(-1, group).all(1) & tau.isfinite()
         # Final can position of the candidates whose episode did not end in a reset.
-        kept = start_alive & ~failed
+        kept = start_alive & ~failed & s0
         err = (imagined["final_pos"] - self.object_state()[:, :3]).norm(dim=-1)
         # Ideal branch: where S0 executed the candidate's arms exactly, the simulated return is the
         # intent's own value, which the ideal branch predicts; elsewhere the predicted gap should be larger.
         # Only candidates the object WM's members agree on for the ideal branch (an input it rarely sees).
-        trusted = start_alive if uncertainty_max is None else start_alive & (imagined["uncertainty_ideal"] <= uncertainty_max)
+        trusted = s0 & (start_alive if uncertainty_max is None else start_alive & (imagined["uncertainty_ideal"] <= uncertainty_max))
         exact = trusted & (track_err < self.well_tracked)
         gap = imagined["chunk_returns_ideal"] - pred
         ideal_check = {
-            "rank/ideal_trusted_share": float(trusted.float().sum() / start_alive.float().sum().clamp(min=1)),
-            "rank/exact_share": float(exact.float().mean()),
+            "rank/ideal_trusted_share": float(trusted.float().sum() / (start_alive & s0).float().sum().clamp(min=1)),
+            "rank/exact_share": float(exact.float().sum() / s0.float().sum()),
             "rank/ideal_mae_exact": float((imagined["chunk_returns_ideal"] - true).abs()[exact].mean()) if bool(exact.any()) else float("nan"),
             "rank/gap_exact": float(gap[exact].mean()) if bool(exact.any()) else float("nan"),
             "rank/gap_inexact": float(gap[trusted & ~exact].mean()) if bool((trusted & ~exact).any()) else float("nan"),
-            "rank/track_err_cm": float(100 * track_err[start_alive].mean()) if bool(start_alive.any()) else float("nan"),
+            "rank/track_err_cm": float(100 * track_err[start_alive & s0].mean()) if bool((start_alive & s0).any()) else float("nan"),
         }  # fmt: skip
+        if ideal_pairs:
+            ideal_check |= _pair_check(true, pred, imagined["chunk_returns_ideal"], start_alive, track_err, task.placed, size, ok)
         critic_check = {} if critic is None else self._critic_check(
             critic, controller, source, task, obs, reset, alive, failed, start_alive, imagined, pred,
-            start["goal"], (steps - delay * k) * env.step_dt, delay * k + H, steps, group,
+            start["goal"], (steps - delay * k) * env.step_dt, delay * k + k, steps, group, on_ideal,
         )  # fmt: skip
+        if self.executor is not None:
+            for e in self.executor:
+                e.attach(None)
         return {
             **ideal_check, **critic_check,
             "rank/tau": float(tau[ok].mean()) if bool(ok.any()) else float("nan"),
             "rank/groups": int(ok.sum()),
-            "rank/return_mae": float((pred - true).abs()[start_alive].mean()),
-            "rank/true_return_std": float(true.view(-1, group).std(1)[ok].mean()) if bool(ok.any()) else float("nan"),
+            "rank/return_mae": float((pred - true).abs()[start_alive & s0].mean()),
+            "rank/true_return_std": float(true[s0].view(-1, size).std(1)[ok].mean()) if bool(ok.any()) else float("nan"),
             "rank/final_pos_err_cm": float(100 * err[kept].mean()) if bool(kept.any()) else float("nan"),
             "rank/clone_spread_cm": float(100 * spread.mean()),
         }  # fmt: skip
 
     def _critic_check(self, critic, controller, source, task, obs, reset, alive, failed, start_alive, imagined,
-                      chunk_pred, goal, t_left: float, first: int, steps: int, group: int) -> dict:  # fmt: skip
+                      chunk_pred, goal, t_left: float, first: int, steps: int, group: int,
+                      on_ideal: torch.Tensor) -> dict:  # fmt: skip
         """``t_left``: seconds of the episode left at the decision."""
         """Continue the candidates' episodes from the chunk's end on the noise policy (8-step replans,
         as collected) and compare their returns with the critic's prediction from the candidates'
@@ -399,8 +476,9 @@ class SimCollector:
             failed |= fell | drop | nan
             live = alive & ~terminated & ~nan
             o = self.object_state()
-            task.step(o[:, :3], o[:, 3:7], released, live)
-            alive &= ~(task.placed | terminated | nan)
+            task.step(o[:, :3], o[:, 3:7], released, live, self.held())
+            failed |= live & task.toppled
+            alive &= ~(task.placed | task.toppled | terminated | nan)
         ro.render(True)
         true = task.potential(failed)
         n = env.num_envs
@@ -408,22 +486,34 @@ class SimCollector:
                                imagined["held_logit_end"], goal, torch.full((n,), t_left, device=self.device))  # fmt: skip
         members = critic(feat)
         q = members.mean(0)
-        tau_q = kendall_tau(q.view(-1, group), true.view(-1, group))
-        tau_chunk = kendall_tau(chunk_pred.view(-1, group), true.view(-1, group))
+        s0 = ~on_ideal  # ranked: the S0 envs (with E* pairs, the other half executed the chunk ideally)
+        size = int(s0.sum()) * group // len(s0)
+
+        def tau_of(x):
+            return kendall_tau(x[s0].view(-1, size), true[s0].view(-1, size))
+
+        tau_q, tau_chunk = tau_of(q), tau_of(chunk_pred)
         # The imagined score as the imagined updates use it (chunk outcome, or the critic beyond it).
-        tau_score = kendall_tau(imagined["returns"].view(-1, group), true.view(-1, group))
+        tau_score = tau_of(imagined["returns"])
         ok = start_alive.view(-1, group).all(1) & tau_q.isfinite()
-        m = start_alive
+        m = start_alive & s0
 
         def mean(x, mask):
             return float(x[mask].mean()) if bool(mask.any()) else float("nan")
 
+        pairs = {}
+        if bool(on_ideal.any()):  # the episode's return with one decision executed ideally, minus with S0
+            both = start_alive[s0] & start_alive[on_ideal]
+            gap = true[on_ideal] - true[s0]
+            pairs = {"rank/episode_gap": mean(gap, both), "rank/episode_gap_pos_share": mean((gap > 0.05).float(), both),
+                     "rank/episode_return_ideal": mean(true[on_ideal], both)}  # fmt: skip
         return {
+            **pairs,
             "rank/critic_tau": mean(tau_q, ok), "rank/chunk_tau_episode": mean(tau_chunk, ok),
             "rank/score_tau_episode": mean(tau_score, ok),
             "rank/critic_groups": int(ok.sum()), "rank/critic_mae": mean((q - true).abs(), m),
             "rank/episode_return": mean(true, m), "rank/episode_success": mean(task.placed.float(), m),
-            "rank/episode_return_group_std": mean(true.view(-1, group).std(1), ok),
-            "rank/critic_group_std": mean(q.view(-1, group).std(1), ok),
+            "rank/episode_return_group_std": mean(true[s0].view(-1, size).std(1), ok),
+            "rank/critic_group_std": mean(q[s0].view(-1, size).std(1), ok),
             "rank/critic_member_std": mean(members.std(0), m),
         }  # fmt: skip

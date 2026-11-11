@@ -81,6 +81,9 @@ class SuperMimicController:
         self.history: tuple[torch.Tensor, torch.Tensor] | None = None
         self.plan: ReferenceTrajectory | None = None
         self.plan_gripper: torch.Tensor | None = None
+        # (N,) bool or None: rows whose episode is over. At their replans they start their current
+        # plan over instead of getting a new one: no images to encode, no reference to sample.
+        self.frozen: torch.Tensor | None = None
     # ------------------------------------------------------------------ observations
 
     def diffusion_state(self) -> torch.Tensor:
@@ -136,7 +139,9 @@ class SuperMimicController:
         if self.plan is None:
             replan[:] = True
         if bool(replan.any()):
-            self._replan(replan, images, states)
+            fresh = replan if self.frozen is None or self.plan is None else replan & ~self.frozen
+            if bool(fresh.any()):
+                self._replan(fresh, images, states)
             self.step_in_chunk[replan] = 0
         offset = self.step_in_chunk.clone()
         goal = self.plan.goal(offset, self.robot.data.body_link_quat_w[:, self.torso])

@@ -27,6 +27,16 @@ def load_diffusion_policy(checkpoint: str | Path, repo: str | Path, device: str 
         )
     return policy, config
 
+def compile_static(policy, mode: str | None = None) -> None:
+    """torch.compile the vision trunk and the DiT in place (as ``compile_for_training``) for static
+    shapes: one specialized compilation per batch size, never the slower dynamic-shape kernels
+    torch switches to once a second size shows up. Callers keep to a few sizes
+    (``SteeredDiffusionSource.predict`` pads to N / 8, N / 4, N / 2 or N rows)."""
+    torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 32)
+    policy.vision.forward_features = torch.compile(policy.vision.forward_features, mode=mode, dynamic=False)
+    policy.dit.compile(mode=mode, dynamic=False)
+
+
 def set_sampling(policy, execute_steps: int | None = None, inference_steps: int | None = None) -> None:
     """Override the checkpoint's control steps per reference (replanning interval, at most the
     reference ``horizon``) and its number of DDIM steps; None keeps the checkpoint's."""

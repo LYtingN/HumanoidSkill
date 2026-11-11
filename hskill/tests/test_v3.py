@@ -199,3 +199,44 @@ def test_gae_advantages_per_decision():
     torch.testing.assert_close(adv[:, 0], torch.tensor([1.0, 1.0, 2.0, 0.0]))
     torch.testing.assert_close(adv[:, 1], torch.tensor([0.5, 0.5, 1.0, -1.0]))
     torch.testing.assert_close(ret[:, 1], torch.tensor([0.5, 1.0, 2.0, 1.0]))
+
+
+def test_buffer_labels_how_and_when_each_episode_ended():
+    ep = _episodes()
+    ep.end_step = torch.tensor([12, 32, 19])  # env 0 placed at step 12, env 1 timed out, env 2 dropped at 19
+    ep.placed, ep.dropped = torch.tensor([True, False, False]), torch.tensor([False, False, True])
+    buf = EpisodeBuffer(capacity=1, decay=1.0, horizon=8, history=4)
+    buf.add(ep)
+    w = buf.windows(256, phi_fraction=0.0)
+    steps = w["obj"][1:, :, 0]  # the step of each window frame
+    assert w["box"].shape == (256, 3)
+    done_steps, fail_steps = steps[w["done"]], steps[w["fail"]]
+    assert set(done_steps.tolist()) <= {12.0} and set(fail_steps.tolist()) <= {19.0}
+    assert bool(w["done"].any()) and bool(w["fail"].any())
+    assert not (w["done"] & w["fail"]).any() and not (w["done"] & ~w["mask"]).any()
+
+
+def test_event_head_soft_outcome_is_a_distribution():
+    from hskill.interaction.events import CONTINUE, DONE, FAIL, EventHead, event_loss, soft_outcome
+
+    H, B = 8, 5
+    head = EventHead(hidden=(32,), context=4)
+    obj = torch.randn(H + 1, B, 13)
+    obj[..., 3:7] = torch.nn.functional.normalize(obj[..., 3:7], dim=-1)
+    logits = head(obj, torch.randn(H + 1, B, 5, 7), torch.rand(H + 1, B, 2) * 0.06, torch.zeros(B, 3), 0.91)
+    assert logits.shape == (H, B, 3)
+    out = soft_outcome(logits)
+    torch.testing.assert_close(out["survive"] + out["p_done"] + out["p_fail"], torch.ones(B))
+    # Certain events: done at step 3 of env 0, fail at step 0 of env 1, nothing for the rest.
+    sure = torch.full((H, B, 3), -30.0)
+    sure[..., CONTINUE] = 30.0
+    sure[3, 0] = torch.tensor([-30.0, -30.0, 30.0])
+    sure[0, 1] = torch.tensor([-30.0, 30.0, -30.0])
+    out = soft_outcome(sure)
+    torch.testing.assert_close(out["p_done"], torch.tensor([1.0, 0, 0, 0, 0]), atol=1e-5, rtol=0)
+    torch.testing.assert_close(out["p_fail"], torch.tensor([0.0, 1, 0, 0, 0]), atol=1e-5, rtol=0)
+    fail, done = torch.zeros(H, B, dtype=torch.bool), torch.zeros(H, B, dtype=torch.bool)
+    done[3, 0], fail[0, 1] = True, True
+    loss, m = event_loss(sure, fail, done, torch.ones(H, B, dtype=torch.bool))
+    assert float(loss) < 1e-6 and abs(float(m["done_ratio"]) - 1) < 1e-4 and abs(float(m["fail_ratio"]) - 1) < 1e-4
+    assert DONE != FAIL

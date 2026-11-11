@@ -12,7 +12,7 @@ from mjlab.utils.nan_guard import NanGuard
 from hskill.s0.controller import SuperMimicController
 from hskill.s0.supermimic import load_tracking_policy
 from hskill.s1.noise_policy import NoisePolicy, SteeredDiffusionSource
-from hskill.s1.sources import load_diffusion_policy, set_sampling
+from hskill.s1.sources import compile_static, load_diffusion_policy, set_sampling
 
 
 class Rollouts:
@@ -30,7 +30,7 @@ class Rollouts:
         set_sampling(self.diffusion, getattr(args, "execute_steps", None), getattr(args, "ddim_steps", None))
         if args.compile:
             # e.g. "max-autotune-no-cudagraphs": ~6% faster DINOv3 + DiT inference than the default, longer warm-up.
-            self.diffusion.compile_for_training(mode=getattr(args, "compile_mode", None))
+            compile_static(self.diffusion, mode=getattr(args, "compile_mode", None))
         self.tracker = load_tracking_policy(args.tracker_checkpoint, device=self.device)
         # A reverse curriculum (``args.curriculum``, phases easy to hard) loads the starts of all its phases.
         self.starts = starts_factory(phase=tuple(getattr(args, "curriculum", ())) or args.grasp_phase)
@@ -110,9 +110,11 @@ class Rollouts:
             dropped |= drop
             diverged |= nan
             live = alive & ~terminated & ~nan
+            # No contact sensing here: a can tilted past topple_cos counts as toppled even in the hand.
             task.step(can.data.root_link_pos_w, can.data.root_link_quat_w, released, live)
-            # An episode ends at success, at a fall or with the can dropped.
-            alive &= ~(task.placed | terminated | nan)
+            dropped |= live & task.toppled
+            # An episode ends at success, at a fall or with the can dropped or toppled.
+            alive &= ~(task.placed | task.toppled | terminated | nan)
         self.render(True)
         returns = task.potential(fallen | dropped | diverged)
         records = source.records
