@@ -86,7 +86,7 @@ class Args:
     # env starts from the recorded state of a collected episode at the start of --grasp-phase
     # (arm already at the can, gripper open; table and cans as recorded).
     start: Literal["collection", "pregrasp", "grasp"] = "collection"
-    grasp_phase: Literal["REACH", "CLOSE", "LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE"] = "CLOSE"
+    grasp_phase: Literal["APPROACH", "REACH", "CLOSE", "LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE"] = "CLOSE"
     grasp_episodes: tuple[int, ...] = ()  # LeRobot episode per env (default: env i -> episode i)
     # Mass of both cans (kg); the collected episodes use 0.62. SuperMimic's arm cannot lift that
     # with the gripper's payload, a light can isolates the policy from that limitation.
@@ -97,6 +97,9 @@ class Args:
     # Overview video camera around the robot: azimuth / elevation (deg) and distance (m).
     overview_camera: tuple[float, float, float] = (215.0, -25.0, 3.0)
     overview_size: tuple[int, int] = (640, 480)  # width, height
+    # Overview video frame rate: a multiple of the 50 Hz control rate up to the physics rate
+    # (200 Hz); above 50 the frames are the simulated states at the physics substeps.
+    overview_fps: int = 50
     plan_radius: float = 0.004  # m: tube radius of the plan keypoint paths
     seed: int = 0
     viewer: bool = False  # live MuJoCo viewer of all envs (needs a display)
@@ -128,16 +131,42 @@ class _Overview:
         self.renderer = mujoco.Renderer(self.model, height=height, width=width)
         self.camera = mujoco.MjvCamera()
         self.camera.azimuth, self.camera.elevation, self.camera.distance = camera
+        self.pelvis = next(b for b in range(self.model.nbody) if self.model.body(b).name.endswith("pelvis"))
+        self.snapshots: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
 
-    def frame(self, draw=None) -> np.ndarray:
-        """``draw(scene)`` adds overlay geoms (e.g. the plan keypoints) before rendering."""
+    def snapshot(self) -> None:
+        """Keep env ``env_id``'s current simulated state (qpos, mocap) for :meth:`frame`."""
+        i, d = self.env_id, self.env.sim.data
+        self.snapshots.append((d.qpos[i].cpu().numpy(), d.mocap_pos[i].cpu().numpy(), d.mocap_quat[i].cpu().numpy()))
+
+    def record_substeps(self, every: int) -> None:
+        """Snapshot after every ``every``-th physics substep of ``env.step``."""
+        sim, inner, count = self.env.sim, self.env.sim.step, [0]
+
+        def step(*a, **k):
+            out = inner(*a, **k)
+            count[0] += 1
+            if count[0] % every == 0:
+                self.snapshot()
+            return out
+
+        sim.step = step
+
+    def frames(self, draw=None) -> list[np.ndarray]:
+        """Render and clear the snapshots (the current state if there are none)."""
+        shots, self.snapshots = self.snapshots or [None], []
+        return [self.frame(draw, s) for s in shots]
+
+    def frame(self, draw=None, state=None) -> np.ndarray:
+        """``draw(scene)`` adds overlay geoms (e.g. the plan keypoints) before rendering;
+        ``state`` a :meth:`snapshot` (default: the current state)."""
         i, sim = self.env_id, self.env.sim
-        self.data.qpos[:] = sim.data.qpos[i].cpu().numpy()
-        self.data.mocap_pos[:] = sim.data.mocap_pos[i].cpu().numpy()
-        self.data.mocap_quat[:] = sim.data.mocap_quat[i].cpu().numpy()
+        if state is None:
+            state = (sim.data.qpos[i].cpu().numpy(), sim.data.mocap_pos[i].cpu().numpy(), sim.data.mocap_quat[i].cpu().numpy())
+        self.data.qpos[:], self.data.mocap_pos[:], self.data.mocap_quat[:] = state
         self.model.geom_rgba[:] = sim.model.geom_rgba[i].cpu().numpy()
         mujoco.mj_forward(self.model, self.data)
-        self.camera.lookat[:] = self.env.scene["robot"].data.root_link_pos_w[i].cpu().numpy()
+        self.camera.lookat[:] = self.data.xpos[self.pelvis]
         self.renderer.update_scene(self.data, camera=self.camera)
         if draw is not None:
             draw(self.renderer.scene)
@@ -339,8 +368,23 @@ def main(args: Args | None = None) -> None:
         if args.diffusion_checkpoint is None:
             raise SystemExit(f"--diffusion-checkpoint is required for --source {args.source}")
         policy, _ = load_diffusion_policy(args.diffusion_checkpoint, args.diffusion_repo, args.device)
-        set_sampling(policy, args.execute_steps, args.ddim_steps)
-        source = DiffusionSource(policy)
+        if policy.policy_type == "ode":
+            from humanoid_diffusion.ode_policy import ODESuperMimicSource
+
+            if args.source == "dsrl":
+                raise ValueError("The deterministic ODE policy does not support DSRL noise steering")
+            if args.ddim_steps is not None or args.execute_steps not in (None, policy.execute_steps):
+                raise ValueError("Keep the ODE checkpoint's trained integration and execute interval")
+            if abs(env.step_dt - policy.dt) > 1e-9:
+                raise ValueError("ODE reference rate must match the simulation control rate")
+            pelvis = robot.body_names.index("pelvis")
+            source = ODESuperMimicSource(
+                policy, env.num_envs,
+                lambda: matrix_from_quat(robot.data.body_link_quat_w[:, pelvis]),
+            )
+        else:
+            set_sampling(policy, args.execute_steps, args.ddim_steps)
+            source = DiffusionSource(policy)
     if args.source == "dsrl":
         if args.noise_checkpoint is None:
             raise SystemExit("--noise-checkpoint is required for --source dsrl")
@@ -348,10 +392,13 @@ def main(args: Args | None = None) -> None:
         noise_policy = NoisePolicy(policy.n_tokens, policy.n_emb, policy.horizon, policy.action_dim,
                                    hidden=state["args"]["hidden"]).to(args.device)  # fmt: skip
         noise_policy.load_state_dict(state["noise_policy"])
-        source = SteeredDiffusionSource(policy, noise_policy.eval(), args.noise_mode, record=False)
+        source = SteeredDiffusionSource(
+            policy, noise_policy.eval(), args.noise_mode, record=False,
+            bf16=bool(state["args"].get("bf16", False)),
+        )
         # train_dsrl checkpoints count iterations, train_v3 ones cycles.
         when = f"iteration {state['iteration']}" if "iteration" in state else f"v3 cycle {state['cycle']}"
-        print(f"dsrl: {args.noise_checkpoint} ({when}), noise {args.noise_mode}")
+        print(f"dsrl: {args.noise_checkpoint} ({when}), noise {args.noise_mode}, bf16={source.bf16}")
     elif args.source == "dataset":
         if args.episode is None:
             raise SystemExit("--episode is required for --source dataset")
@@ -413,6 +460,12 @@ def main(args: Args | None = None) -> None:
         except (AttributeError, ImportError, mujoco.FatalError) as error:
             # The CPU renderer needs an EGL/OSMesa library; the head camera renders on the GPU.
             print(f"overview video skipped: no OpenGL context for MUJOCO_GL ({error})")
+        substeps = env.cfg.decimation
+        per_step = args.overview_fps * env.step_dt
+        if overview is not None and args.overview_fps != round(1.0 / env.step_dt):
+            if abs(per_step - round(per_step)) > 1e-6 or substeps % round(per_step):
+                raise ValueError(f"--overview-fps must be k x {1.0 / env.step_dt:.0f} with k dividing {substeps}")
+            overview.record_substeps(substeps // round(per_step))
     viewer = None
     if args.viewer:
         viewer = _LiveViewer(env)
@@ -492,7 +545,7 @@ def main(args: Args | None = None) -> None:
             rel = (can.data.root_link_pos_w[:, :2] - box[:, :2]).abs()
             placed |= (rel < inner).all(-1) & (can_z < geo.box_bottom_z + geo.can_height)
             if overview is not None:
-                videos["overview"].append(overview.frame(plan_points.draw if plan_points is not None else None))
+                videos["overview"] += overview.frames(plan_points.draw if plan_points is not None else None)
             if args.video_envs > 0 and "head_camera" in env.scene.sensors:
                 videos["head"].append(env.scene["head_camera"].data.rgb[0].cpu().numpy())
             if viewer is not None:
@@ -557,7 +610,7 @@ def main(args: Args | None = None) -> None:
         for name, frames in videos.items():
             if frames:
                 path = args.out_dir / f"{args.source}_{name}_env0.mp4"
-                mediapy.write_video(path, frames, fps=fps)
+                mediapy.write_video(path, frames, fps=args.overview_fps if name == "overview" else fps)
                 print(f"  wrote {path}")
 
 

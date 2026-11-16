@@ -69,7 +69,7 @@ class Args:
     bf16: bool = True
     pairs: int = 4  # groups
     start: Literal["collection", "grasp"] = "collection"
-    grasp_phase: Literal["REACH", "CLOSE", "LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE"] = "CLOSE"
+    grasp_phase: Literal["APPROACH", "REACH", "CLOSE", "LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE"] = "CLOSE"
     grasp_episodes: tuple[int, ...] = ()  # LeRobot episode per group (default: the first ``pairs``)
     seconds: float = 24.0
     switch_at: float | None = None  # s: groups of four with the two switched executors (see above)

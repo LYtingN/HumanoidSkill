@@ -1,8 +1,9 @@
 """Start episodes from recorded states at the reach / grasp of the collected episodes.
 
 ``assets/grasp_starts.json`` (``scripts/extract_grasp_starts.py``) holds, per LeRobot
-``episode_index``, the first frame of each phase of the MuJoCo collection (REACH, CLOSE and the
-later ones a reverse curriculum starts from: LIFT, TURN_WALK, PLACE_REACH, LOWER, RELEASE):
+``episode_index``, the first frame of each phase of the MuJoCo collection (APPROACH, the episode
+start before the walk to the table; REACH, CLOSE and the later ones a reverse curriculum starts
+from: LIFT, TURN_WALK, PLACE_REACH, LOWER, RELEASE):
 robot root pose and joints, target / resident can poses, gripper openings and the table
 layout. :func:`apply_grasp_start` writes one of them into each given env (env frame +
 env origin), so the policy starts with the arm already at the can.
