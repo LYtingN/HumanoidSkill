@@ -1,5 +1,7 @@
 # Dataset and runtime directories; keep src/supermimic/data and scripts/data tracked.
-/data/
+/data
+/downloads
+/checkpoints
 /logs/
 /supermimic-reproduced/data/
 /supermimic-reproduced/logs/
@@ -21,6 +23,9 @@ dist/
 wandb/
 .env
 .env.*
+/deploy/aihc/*.local.json
+/deploy/aihc/runs/
+/deploy/aihc/environment/.ready
 
 # Checkpoints, datasets and generated media
 *.pt

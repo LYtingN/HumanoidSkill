@@ -47,7 +47,7 @@ import mujoco
 import numpy as np
 import torch
 import tyro
-from can_pnp.scene.config import CanPnpSceneCfg, LayoutCfg, SceneGeometryCfg
+from can_pnp.scene.config import CanPnpSceneCfg, HeadCameraCfg, LayoutCfg, SceneGeometryCfg
 from can_pnp.scene.env_cfg import CanPnpEnvCfgArgs, make_env
 from can_pnp.scene.layout import layout_term
 from can_pnp.starts import GraspStarts, apply_grasp_start
@@ -93,6 +93,7 @@ class Args:
     can_mass: float | None = None
     device: str = "cuda:0"
     out_dir: Path = Path("logs/pipeline")
+    render_size: tuple[int, int] = (HeadCameraCfg().width, HeadCameraCfg().height)
     video_envs: int = 1
     # Overview video camera around the robot: azimuth / elevation (deg) and distance (m).
     overview_camera: tuple[float, float, float] = (215.0, -25.0, 3.0)
@@ -351,11 +352,13 @@ def main(args: Args | None = None) -> None:
     closed_loop = args.source in ("diffusion", "dsrl")
     need_camera = closed_loop or args.video_envs > 0 or args.viewer
     unlimited = args.seconds <= 0
+    torch.manual_seed(args.seed)
     env = make_env(
         CanPnpEnvCfgArgs(
             num_envs=args.num_envs, randomize=args.randomize, camera=need_camera,
             episode_length_s=1e9 if unlimited else args.seconds + 1.0, seed=args.seed,
             scene=CanPnpSceneCfg(
+                camera=HeadCameraCfg(width=args.render_size[0], height=args.render_size[1]),
                 layout=LayoutCfg(robot_start="pregrasp" if args.start == "pregrasp" else "collection"),
                 geometry=SceneGeometryCfg(**({} if args.can_mass is None else {"can_mass": args.can_mass})),
             ),
@@ -392,13 +395,15 @@ def main(args: Args | None = None) -> None:
         noise_policy = NoisePolicy(policy.n_tokens, policy.n_emb, policy.horizon, policy.action_dim,
                                    hidden=state["args"]["hidden"]).to(args.device)  # fmt: skip
         noise_policy.load_state_dict(state["noise_policy"])
+        if args.execute_steps is None:
+            set_sampling(policy, state["args"].get("execute_steps"))
         source = SteeredDiffusionSource(
             policy, noise_policy.eval(), args.noise_mode, record=False,
             bf16=bool(state["args"].get("bf16", False)),
         )
         # train_dsrl checkpoints count iterations, train_v3 ones cycles.
         when = f"iteration {state['iteration']}" if "iteration" in state else f"v3 cycle {state['cycle']}"
-        print(f"dsrl: {args.noise_checkpoint} ({when}), noise {args.noise_mode}, bf16={source.bf16}")
+        print(f"dsrl: {args.noise_checkpoint} ({when}), noise {args.noise_mode}, bf16={source.bf16}, execute_steps={source.execute_steps}")
     elif args.source == "dataset":
         if args.episode is None:
             raise SystemExit("--episode is required for --source dataset")

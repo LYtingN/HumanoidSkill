@@ -1,0 +1,18 @@
+{
+  "ssh_host": "root@YOUR_DEV_IP",
+  "ssh_port": 8019,
+  "dev_id": "dv-REPLACE",
+  "pool": "aihc-REPLACE",
+  "job_api_pool": "aihc-serverless",
+  "queue": "aihcq-REPLACE",
+  "cfs_instance": "cfs-REPLACE",
+  "cfs_mount_point": "REPLACE.cfs.bj.baidubce.com",
+  "cfs_root": "/mnt/cfs/usr/nyx",
+  "image": "",
+  "gpu_resource_name": "",
+  "gpu_count": 8,
+  "cpu": 48,
+  "memory_gib": 500,
+  "shared_memory_gib": 250,
+  "aihc_config": "~/.aihc/nyx.yaml"
+}

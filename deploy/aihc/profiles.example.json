@@ -1,0 +1,19 @@
+{
+  "supermimic": {
+    "library": "",
+    "npz_dir": "",
+    "args": ["--env.num-envs", "4096"]
+  },
+  "can-pnp-dsrl": {
+    "tracker": "",
+    "diffusion": "",
+    "diffusion_repo": "",
+    "args": ["--groups", "32", "--group-size", "8"]
+  },
+  "can-pnp-v3": {
+    "tracker": "",
+    "diffusion": "",
+    "diffusion_repo": "",
+    "args": ["--num-envs", "512"]
+  }
+}

@@ -1,0 +1,46 @@
+[project]
+name = "humanoidskill-aihc"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "mjlab",
+  # Match the repository lock: newer mjviser installs MuJoCo 4 into the same namespace.
+  "mjviser==0.0.14",
+  "mujoco-warp~=3.16.0",
+  "mujoco~=3.16.0",
+  "numpy", "pillow", "pyarrow", "tyro>=1.0.1",
+  "scipy>=1.15", "tensorboard>=2.20.0", "huggingface-hub>=0.30",
+  "pandas", "tqdm", "timm==1.0.30", "diffusers==0.42.0",
+  "torch==2.14.1",
+  "torchvision==0.29.1",
+  "warp-lang==1.18.0",
+  "pytest>=8,<10",
+]
+
+[tool.uv]
+package = false
+# The existing can-pnp environment deliberately targets older CUDA 12 hosts.
+# Override only in this AIHC environment; do not change either original lockfile.
+override-dependencies = ["warp-lang==1.18.0"]
+allow-insecure-host = ["mirrors.baidubce.com"]
+
+[tool.uv.sources]
+mjlab = { git = "https://github.com/mujocolab/mjlab", rev = "8bb2bc9e187797689ec82c78c35019afd2fd0376" }
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+warp-lang = { index = "nvidia" }
+
+[[tool.uv.index]]
+name = "baidu"
+url = "http://mirrors.baidubce.com/pypi/simple/"
+default = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com/"
+explicit = true

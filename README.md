@@ -29,6 +29,9 @@ The experiment entry points supply the scene factory, grasp starts, layout looku
 tracker to the core. SuperMimic and Humanoid-Diffusion continue to load from their checkouts.
 SuperMimic keeps its own cu130 environment; this workspace uses cu126.
 
+For CPU-only development and AIHC eight-GPU training submissions through Codex,
+see [the AIHC setup guide](deploy/aihc/README.md).
+
 ## Setup
 
 Run these commands from `humanoid_skill/`:

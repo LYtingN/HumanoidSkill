@@ -51,39 +51,21 @@ def reference_plan(
         joint_pos, rot6d, root_quat_w, default_joint_pos, dt=dt, root_height=height, root_lin_vel_w=lin_vel
     )
 
-class SuperMimicController:
-    def __init__(
-        self,
-        env: ManagerBasedRlEnv,
-        source,
-        tracker: TrackingPolicy,
-        image_size: int = 224,
-        camera: str | None = "head_camera",
-    ):
-        self.env, self.source, self.tracker = env, source, tracker
+class DiffusionObservations:
+    """Head-camera and proprioception histories shared by the FM controllers."""
+
+    def __init__(self, env, obs_horizon, image_size, camera):
         self.robot = env.scene["robot"]
         self.camera = env.scene[camera] if camera else None
         self.image_size = image_size
-        self.execute_steps = source.execute_steps
-        self.obs_horizon = source.obs_horizon
+        self.obs_horizon = obs_horizon
         self.body_ids = self.robot.find_joints(C.BODY_JOINT_NAMES, preserve_order=True)[0]
         self.gripper_ids = self.robot.find_joints(C.GRIPPER_JOINT_NAMES, preserve_order=True)[0]
         self.pelvis = self.robot.body_names.index("pelvis")
         self.torso = self.robot.body_names.index("torso_link")
         self.wrists = [self.robot.body_names.index(f"{s}_wrist_yaw_link") for s in ("left", "right")]
-        self.default_joint_pos = self.robot.data.default_joint_pos[:, self.body_ids]
-        # The full-observation tracker also needs the reference root height and velocity.
-        self.legs = None
-        if tracker.goal_dim == FULL_GOAL_DIM:
-            self.legs = LegKinematics(env.sim.mj_model, C.BODY_JOINT_NAMES, env.device, prefix="robot/")
-        n = env.num_envs
-        self.step_in_chunk = torch.zeros(n, dtype=torch.long, device=env.device)
         self.history: tuple[torch.Tensor, torch.Tensor] | None = None
-        self.plan: ReferenceTrajectory | None = None
-        self.plan_gripper: torch.Tensor | None = None
-        # (N,) bool or None: rows whose episode is over. At their replans they start their current
-        # plan over instead of getting a new one: no images to encode, no reference to sample.
-        self.frozen: torch.Tensor | None = None
+
     # ------------------------------------------------------------------ observations
 
     def diffusion_state(self) -> torch.Tensor:
@@ -119,6 +101,32 @@ class SuperMimicController:
         states[reset] = state[reset, None]
         self.history = (images, states)
         return images, states
+
+
+class SuperMimicController(DiffusionObservations):
+    def __init__(
+        self,
+        env: ManagerBasedRlEnv,
+        source,
+        tracker: TrackingPolicy,
+        image_size: int = 224,
+        camera: str | None = "head_camera",
+    ):
+        self.env, self.source, self.tracker = env, source, tracker
+        super().__init__(env, source.obs_horizon, image_size, camera)
+        self.execute_steps = source.execute_steps
+        self.default_joint_pos = self.robot.data.default_joint_pos[:, self.body_ids]
+        # The full-observation tracker also needs the reference root height and velocity.
+        self.legs = None
+        if tracker.goal_dim == FULL_GOAL_DIM:
+            self.legs = LegKinematics(env.sim.mj_model, C.BODY_JOINT_NAMES, env.device, prefix="robot/")
+        n = env.num_envs
+        self.step_in_chunk = torch.zeros(n, dtype=torch.long, device=env.device)
+        self.plan: ReferenceTrajectory | None = None
+        self.plan_gripper: torch.Tensor | None = None
+        # (N,) bool or None: rows whose episode is over. At their replans they start their current
+        # plan over instead of getting a new one: no images to encode, no reference to sample.
+        self.frozen: torch.Tensor | None = None
 
     # ------------------------------------------------------------------ control
 

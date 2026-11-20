@@ -60,6 +60,7 @@ class CanPnpEnvCfgArgs:
     hand_gravcomp: bool = True
     njmax: int | None = 600
     scene: CanPnpSceneCfg = field(default_factory=CanPnpSceneCfg)
+    enable_time_out: bool = True
 
 
 def _edit_scene_spec(spec: mujoco.MjSpec, scene: CanPnpSceneCfg) -> None:
@@ -182,6 +183,8 @@ def make_env_cfg(a: CanPnpEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             func=mdp.can_dropped, params={"entity_name": "can", "drop_height": a.can_drop_height}
         ),
     }
+    if not a.enable_time_out:
+        del terminations["time_out"]
     return ManagerBasedRlEnvCfg(
         scene=make_scene_cfg(a),
         observations=observations,
