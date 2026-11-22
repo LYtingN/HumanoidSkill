@@ -10,6 +10,7 @@ MODULES = {
     "supermimic": ("supermimic-reproduced", "supermimic.scripts.train"),
     "can-pnp-dsrl": (".", "experiments.train_dsrl"),
     "can-pnp-v3": (".", "experiments.train_v3"),
+    "fivepoint-flashsac": (".", "experiments.train_fivepoint"),
 }
 
 
@@ -18,6 +19,10 @@ def training_args(profile, settings, output):
         data = (["--data.library", settings["library"]] if settings.get("library")
                 else ["--data.npz-dir", settings["npz_dir"]])
         return data + ["--log-root", str(output), "--run-name", "train"] + settings.get("args", [])
+    if profile == "fivepoint-flashsac":
+        # The script adds FM_DIR/inference_source and TRACKER/source to sys.path itself.
+        return ["--fm", settings["fm"], "--tracker-release", settings["tracker_release"],
+                "--out-dir", str(output), "--auto-resume"] + settings.get("args", [])
     return ["--tracker-checkpoint", settings["tracker"],
             "--diffusion-checkpoint", settings["diffusion"],
             "--diffusion-repo", settings["diffusion_repo"],

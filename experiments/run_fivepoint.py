@@ -44,6 +44,11 @@ class FivePointTrajectories:
                 if np.linalg.norm(b - a) > 1e-5:
                     visualizer.add_cylinder(a, b, .009, color)
             visualizer.add_sphere(path[-1], .022, color)
+        future_indices = getattr(getattr(self.controller, "reference", None), "future_indices", None)
+        if future_indices is not None:
+            for frame in self.points[future_indices]:
+                for point in frame:
+                    visualizer.add_sphere(point, .014, (1., 1., 1., 1.))
         if first_draw:
             print(f"Native five-point overlay drawn ({len(remaining)} predicted frames)", flush=True)
 
@@ -83,19 +88,36 @@ def run_native(env, controller, start_episode, limit):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fm", type=Path, default=Path("downloads/5points_FM/fivepoints_fm.pt"))
+    parser.add_argument("--flashsac", type=Path, help="Use the trained deterministic FM noise actor")
     backend = parser.add_mutually_exclusive_group()
-    backend.add_argument("--official-human-five", action="store_true", help="Adapt FM targets to the official v0.1 human/five ONNX tracker")
-    backend.add_argument("--tracker", type=Path, default=Path("downloads/morphmimic/ckpt_70000.pt"))
+    backend.add_argument("--official-human-five", dest="tracker", action="store_const", const=None,
+                         help="Use the official v0.1 human/five ONNX tracker (default)")
+    backend.add_argument("--tracker", type=Path, help="Use a G1 keypoint tracker checkpoint")
+    parser.add_argument("--sample-future", action=argparse.BooleanOptionalAction, default=None,
+                        help="Hold ten evenly spaced future frames until the next FM replan "
+                             "(human/five default); --no-sample-future uses a sliding window")
     parser.add_argument("--episode", type=int, default=3)
-    parser.add_argument("--phase", choices=["WALK", "REACH", "CLOSE"],
-                        help="Start at the walking approach (live default) or a recorded grasp phase")
+    parser.add_argument("--phase", choices=["WALK", "APPROACH", "REACH", "CLOSE", "LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE"],
+                        help="WALK uses the scene layout; APPROACH uses the recorded episode start")
     parser.add_argument("--seconds", type=float, help="Optional run duration in simulation seconds (recording default: 14)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--record", type=Path, help="Save one rollout to this MP4 and exit")
+    parser.add_argument("--measured-gripper", action=argparse.BooleanOptionalAction, default=True,
+                        help="Start held phases from the measured gripper opening, as FlashSAC training does")
+    parser.add_argument("--gripper-hysteresis", type=float, nargs="*", default=[0.02, 0.05], metavar="M",
+                        help="Right gripper closes below the first FM width, reopens above the second (m), as in "
+                             "training; no values: raw FM widths. A --flashsac checkpoint's own setting wins")
     args = parser.parse_args()
+    if args.flashsac and (args.tracker or args.sample_future is False):
+        parser.error("--flashsac requires the official v0.1 tracker with sampled future frames")
+    if args.sample_future is not None and args.tracker is not None:
+        parser.error("Future-frame sampling options apply only to the official human/five tracker")
+    if args.gripper_hysteresis and not (len(args.gripper_hysteresis) == 2
+                                        and 0 <= args.gripper_hysteresis[0] <= args.gripper_hysteresis[1] <= 0.065):
+        parser.error("--gripper-hysteresis takes CLOSE REOPEN widths in [0, 0.065] m")
     if args.seconds is not None and (not math.isfinite(args.seconds) or args.seconds <= 0):
         parser.error("--seconds must be positive")
-    phase = args.phase or ("CLOSE" if args.record else "WALK")
+    phase = args.phase or ("APPROACH" if args.flashsac else "CLOSE" if args.record else "WALK")
     seconds = 14 if args.record and args.seconds is None else args.seconds
     torch.manual_seed(args.seed)
     geometry = SceneGeometryCfg(can_mass=.1)
@@ -104,17 +126,24 @@ def main():
                                     enable_time_out=False, scene=scene), device="cuda:0")
     with ExitStack() as stack:
         stack.callback(env.close)
-        if args.official_human_five:
+        can_bodies = env.scene["can"].indexing.body_ids.cpu().numpy()
+        can_mass = env.sim.mj_model.body_mass[can_bodies].sum()
+        print(f"Target can mass (compiled model): {can_mass:.6f} kg", flush=True)
+        if args.tracker is None:
             from hskill.s0.official_five import OfficialFiveController
-            controller = OfficialFiveController(env, args.fm)
+            controller = OfficialFiveController(env, args.fm, sample_future=args.sample_future is not False)
             tracker_label = "v0.1 human/five"
         else:
             controller = FivePointController(env, args.fm, args.tracker)
             tracker_label = args.tracker.stem
-        starts = GraspStarts(phase=phase) if phase != "WALK" else None
+        controller.gripper_hysteresis = tuple(args.gripper_hysteresis) if args.gripper_hysteresis else None
+        if args.flashsac:
+            controller.load_flashsac_actor(args.flashsac)
+        starts = GraspStarts(phase=phase, measured_gripper=args.measured_gripper) if phase != "WALK" else None
         ids = torch.tensor([0], device=env.device)
         if starts is not None:
             episode_row = torch.tensor([starts.episode_ids.index(args.episode)])
+            print(f"Recorded start: episode={args.episode} phase={phase} frame={starts.frame[episode_row].item()}", flush=True)
 
         def start_episode():
             if starts is not None:

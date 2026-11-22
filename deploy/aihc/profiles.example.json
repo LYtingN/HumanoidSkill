@@ -15,5 +15,10 @@
     "diffusion": "",
     "diffusion_repo": "",
     "args": ["--num-envs", "512"]
+  },
+  "fivepoint-flashsac": {
+    "fm": "",
+    "tracker_release": "",
+    "args": []
   }
 }

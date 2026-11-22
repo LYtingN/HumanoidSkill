@@ -7,7 +7,7 @@ import torch
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
 from deploy.sim2sim import human
-from deploy.sim2sim.obs import quat_apply, quat_apply_inverse as rotate_back, quat_inv, quat_mul, yaw_quat
+from deploy.sim2sim.obs import GOAL_K, quat_apply, quat_apply_inverse as rotate_back, quat_inv, quat_mul, yaw_quat
 from deploy.sim2sim.policy_node import PolicyRunner
 from humanoid_diffusion.keypoints import KP_BODY_NAMES
 
@@ -18,7 +18,7 @@ from hskill.s0.fivepoint import FivePointPlanner
 class HumanFiveReference:
     """Use corresponding robot/human poses in the release's paired standing frame."""
 
-    def __init__(self, stand_file, tracked_bodies, execute_steps):
+    def __init__(self, stand_file, tracked_bodies, execute_steps, *, future_horizon=None):
         stand = json.loads(stand_file.read_text())["g1"]["state"]
         indices = [tracked_bodies.index(name) for name in KP_BODY_NAMES]
         self.robot_pos = np.asarray(stand[58:100]).reshape(14, 3)[indices]
@@ -34,6 +34,11 @@ class HumanFiveReference:
         self.height_ratio = human_pos[0, 2] / self.robot_pos[0, 2]
         self.axes = quat_mul(quat_inv(self.robot_quat), self.stand[self.slots, 3:])
         self.execute_steps = execute_steps
+        self.future_indices = None
+        if future_horizon is not None:
+            if future_horizon - execute_steps < GOAL_K:
+                raise ValueError("The FM plan needs at least 10 distinct frames after the execution prefix")
+            self.future_indices = np.linspace(execute_steps, future_horizon - 1, GOAL_K).round().astype(int)
         self.frames = None
 
     def update(self, pos, quat):
@@ -50,21 +55,25 @@ class HumanFiveReference:
         self.frames = frames.reshape(len(pos), -1)
 
     def window(self, step_id, imu_quat, q):
+        if self.future_indices is not None:
+            return self.frames[self.future_indices]
         start = step_id % self.execute_steps
-        return self.frames[start:start + 10]
+        return self.frames[start:start + GOAL_K]
 
     def reset(self):
         self.frames = None
 
 
 class OfficialFiveController(FivePointPlanner):
-    def __init__(self, env, fm_path):
+    def __init__(self, env, fm_path, *, sample_future=True, release=Path("downloads/morphmimic-v0.1")):
         super().__init__(env, fm_path)
-        release = Path("downloads/morphmimic-v0.1")
         export = release / "morphmimic_policy"
         robot = json.loads((export / "g1_amber.json").read_text())["robot"]
         self.reference = HumanFiveReference(release / "source/deploy/vr_teleop/gmr_configs/stand.json",
-                                            robot["tracked_bodies"], self.fm.execute_steps)
+                                            robot["tracked_bodies"], self.fm.execute_steps,
+                                            future_horizon=self.fm.horizon if sample_future else None)
+        if sample_future:
+            print(f"Tracker future frames (zero-based): {self.reference.future_indices.tolist()}", flush=True)
         self.runner = PolicyRunner(export, "g1_amber", self.reference, interface="human", human_points="five")
         self.action_term = env.action_manager.get_term("joint_pos")
         if (self.runner.robot.native_joint_names != C.BODY_JOINT_NAMES or

@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 GRASP_STARTS = Path(__file__).parent / "scene" / "assets" / "grasp_starts.json"
+# Measured (not commanded) gripper openings at the same starts (scripts/extract_measured_gripper.py).
+MEASURED_GRIPPER = Path(__file__).parent / "scene" / "assets" / "grasp_starts_gripper_measured.json"
 
 # Held-out episodes of the diffusion policy's training split (dataset_report.json, seed 42).
 VAL_EPISODES = (3, 46, 50, 54, 79, 120, 135, 169, 171, 204, 221, 245)
@@ -37,7 +39,8 @@ class GraspStarts:
     """One row per (phase, episode): ``phase`` one phase name or several (rows phase-major,
     ``phase_ids`` the index into ``phases`` per row)."""
 
-    def __init__(self, path: str | Path = GRASP_STARTS, phase: str | tuple[str, ...] = "CLOSE"):
+    def __init__(self, path: str | Path = GRASP_STARTS, phase: str | tuple[str, ...] = "CLOSE",
+                 measured_gripper: bool = False):
         episodes = json.loads(Path(path).read_text())
         self.phase = phase
         self.phases = (phase,) if isinstance(phase, str) else tuple(phase)
@@ -59,7 +62,13 @@ class GraspStarts:
         self.joint_pos = torch.tensor(
             [[f["joint_pos"][name] for name in C.BODY_JOINT_NAMES] for f in frames]
         )
-        self.gripper_opening = stack("gripper_opening")  # left, right (m)
+        self.gripper_opening = stack("gripper_opening")  # left, right (m), as commanded
+        if measured_gripper:
+            # A held can keeps the fingers at its width: start from the measured opening instead
+            # of the commanded 0, which would close the fingers through the can.
+            measured = json.loads(MEASURED_GRIPPER.read_text())
+            self.gripper_opening = torch.tensor([measured[str(e)][p] for p in self.phases for e in ids],
+                                                dtype=torch.float32)
 
     def __len__(self) -> int:
         return len(self.episode_ids)

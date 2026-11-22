@@ -9,7 +9,7 @@
 Policy: :class:`hskill.s1.noise_policy.NoisePolicy` chooses the DDIM initial noise of the frozen diffusion
 policy at every replan (8 control steps); the SuperMimic tracker executes the reference.
 
-GRPO: every iteration each env group restarts from one recorded grasp start (all envs of a
+GRPO: every iteration each env group restarts from one recorded phase start (all envs of a
 group from the same state), rolls out ``episode_s`` seconds and gets one episodic return, the
 undiscounted sum of the task's rewards (``can_pnp.task_spec``: a terminal reward plus a
 potential-based shaping) up to the shaping of the shared start: ``success_reward`` once the task
@@ -56,8 +56,8 @@ class Args:
     # Rollouts (per GPU): groups x group_size envs, each group from one grasp start.
     groups: int = 32
     group_size: int = 8
-    episode_s: float = 14.0
-    grasp_phase: Literal["REACH", "CLOSE"] = "CLOSE"
+    episode_s: float = 20.0  # Includes the walk to the table and placement.
+    grasp_phase: Literal["APPROACH", "REACH", "CLOSE"] = "APPROACH"  # Recorded frame 0, before walking.
     can_mass: float = 0.1
     # Returns: success_reward, else sum_i w_i exp(-final can-goal distance / scale_i) (0 after a fall / drop).
     success_reward: float = 10.0

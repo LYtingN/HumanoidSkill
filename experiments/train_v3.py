@@ -61,6 +61,11 @@ CLOSE) is a reverse curriculum: collection groups start at the frontier phase (a
 frontier moves one phase back once the noise policy's success rate there reaches
 ``curriculum_advance``; the ranking check starts at the frontier. Without it every start is a
 ``grasp_phase`` one.
+
+With ``--curriculum-sampler sgs``, each (phase, training episode) is a fixed reset
+configuration. Draw a phase per synchronous collection by its total SGS weight, then
+draw starts within it per group, preserving phase-specific episode lengths. Only actual
+noise-policy placements update the last 100 outcomes of each start.
 """
 
 from __future__ import annotations
@@ -81,6 +86,7 @@ import torch.distributed as dist
 import tyro
 from can_pnp.task_spec import TaskTracker
 from hskill.data.buffer import TIME_MAJOR, EpisodeBuffer
+from hskill.data.sgs import SuccessGuidedSampler
 from hskill.executors.imagine import PhiStep
 from hskill.executors.imaginer import Imaginer
 from hskill.interaction.events import EventHead, event_loss
@@ -108,8 +114,8 @@ class Args:
     init_noise_checkpoint: Path | None = None  # start the noise policy from a train_dsrl checkpoint
     # Simulator (per GPU).
     num_envs: int = 512
-    episode_s: float = 14.0
-    grasp_phase: Literal["REACH", "CLOSE"] = "CLOSE"
+    episode_s: float = 20.0  # Includes the walk to the table and placement.
+    grasp_phase: Literal["APPROACH", "REACH", "CLOSE"] = "APPROACH"  # Recorded frame 0, before walking.
     can_mass: float = 0.1
     base_fraction: float = 0.25  # collection envs on N(0, I) noise
     bf16: bool = True
@@ -172,8 +178,10 @@ class Args:
     # value by the critic), once its pool holds imag_critic_min_pool samples of the current object WM.
     imag_critic_weight: float = 1.0
     imag_critic_min_pool: int = 4096
-    # Reverse curriculum: start phases from easy to hard; empty: grasp_phase only.
+    # Reset phases. In reverse mode, order them easy to hard; SGS samples across the set.
     curriculum: tuple[str, ...] = ()
+    # Without explicit curriculum phases, either sampler uses grasp_phase alone.
+    curriculum_sampler: Literal["reverse", "sgs"] = "reverse"
     curriculum_advance: float = 0.5  # policy success rate at the frontier phase that moves it back one phase
     curriculum_frontier: float = 0.75  # share of the collection groups at the frontier, the rest on easier phases
     # Episode length (s) per curriculum phase; a collection (and the ranking check) runs the
@@ -324,8 +332,7 @@ def main(args: Args | None = None) -> None:
         start, imag_iters = state["cycle"] + 1, state["imag_iters"]
         level = state.get("curriculum_level", 0)
         if "critic" in state:
-            critic.load_state_dict(state["critic"])
-            critic_optimizer.load_state_dict(state["critic_optimizer"])
+            critic.restore_training_state(state["critic"], critic_optimizer, state["critic_optimizer"])
         if "event_head" in state:
             event_head.load_state_dict(state["event_head"])
             event_optimizer.load_state_dict(state["event_optimizer"])
@@ -354,6 +361,11 @@ def main(args: Args | None = None) -> None:
     if args.curriculum_episode_s and len(args.curriculum_episode_s) != len(phases):
         raise ValueError(f"curriculum_episode_s needs one length per phase {phases}")
     phase_rows = [train_rows[rollouts.starts.phase_ids[train_rows] == i] for i in range(len(phases))]
+    sgs = None
+    if args.curriculum_sampler == "sgs":
+        sgs = SuccessGuidedSampler(rollouts.starts, train_rows, args.seed)
+        if args.resume is not None and "sgs" in state:
+            sgs.load_state_dict(state["sgs"])
     n = env.num_envs
 
     if n % args.sim_group:
@@ -367,15 +379,25 @@ def main(args: Args | None = None) -> None:
 
     def collect():
         """Episodes, stats and each env's start phase (N,)."""
+        nonlocal level
+        if sgs is not None:
+            level = sgs.sample_phase()
         phase = torch.full((groups,), level)
-        if level > 0:  # the groups off the frontier replay an easier phase
-            easy = torch.rand(groups, generator=rng) >= args.curriculum_frontier
-            phase[easy] = torch.randint(level, (int(easy.sum()),), generator=rng)
-        rows = sample_rows(groups, phase).repeat_interleave(args.sim_group)
+        if sgs is not None:
+            rows = sgs.sample_rows(level, groups, rng)
+        else:
+            if level > 0:  # the groups off the frontier replay an easier phase
+                easy = torch.rand(groups, generator=rng) >= args.curriculum_frontier
+                phase[easy] = torch.randint(level, (int(easy.sum()),), generator=rng)
+            rows = sample_rows(groups, phase)
+        rows = rows.repeat_interleave(args.sim_group)
         base = torch.rand(groups, generator=rng) < args.base_fraction
         ideal = ~base & (torch.rand(groups, generator=rng) < args.ideal_collect_fraction)
         base, ideal = base.repeat_interleave(args.sim_group), ideal.repeat_interleave(args.sim_group)
         episodes, stats = collector.collect(noise_policy, rows, base.to(device), episode_seconds(), ideal.to(device))
+        if sgs is not None:
+            sgs.observe(rows, episodes.placed, episodes.policy_envs())
+            stats.update(sgs.metrics())
         return episodes, stats, phase.repeat_interleave(args.sim_group).to(device)
 
     def episode_seconds() -> float:
@@ -687,9 +709,13 @@ def main(args: Args | None = None) -> None:
             sim_stats = _all_mean(sim_stats, ddp, device) | curriculum
             frontier = curriculum.get(f"curriculum/success_{phases[level]}", float("nan"))
             success = frontier if args.curriculum else sim_stats.get("sim/success_rate", float("nan"))
-            control["curriculum/level"], control["curriculum/frontier_success"] = float(level), frontier
+            if sgs is not None:
+                success = curriculum["curriculum/pool_success"]
+                control["curriculum/sampled_phase"] = float(level)
+            else:
+                control["curriculum/level"], control["curriculum/frontier_success"] = float(level), frontier
             control["curriculum/episode_s"] = episode_seconds()
-            if args.curriculum and frontier >= args.curriculum_advance and level < len(phases) - 1:
+            if sgs is None and args.curriculum and frontier >= args.curriculum_advance and level < len(phases) - 1:
                 level += 1
                 best_success, best_policy = -1.0, None  # a harder frontier: no rollback to the easier one's best
                 control["curriculum/advanced"] = 1.0
@@ -767,6 +793,8 @@ def main(args: Args | None = None) -> None:
                 "diffusion_checkpoint": str(args.diffusion_checkpoint),
                 "tracker_checkpoint": str(args.tracker_checkpoint),
             }  # fmt: skip
+            if sgs is not None:
+                state["sgs"] = sgs.state_dict()
             params = list(state["noise_policy"].values()) + list(state["object_wm"].values())
             if not all(bool(v.isfinite().all()) for v in params if v.is_floating_point()):
                 raise RuntimeError(f"Non-finite parameters at cycle {cycle}; last.pt kept")
@@ -774,8 +802,12 @@ def main(args: Args | None = None) -> None:
                 torch.save(state, args.out_dir / "last.pt")
             # With a curriculum, a harder frontier beats any score on an easier one.
             # The level the episodes were collected at (before an advance in this cycle).
-            score = (record.get("curriculum/level", level) + record.get("curriculum/frontier_success", 0.0) if args.curriculum
-                     else record.get("sim/return", -float("inf")))  # fmt: skip
+            if sgs is not None:
+                score = record.get("curriculum/pool_success", -float("inf"))
+            elif args.curriculum:
+                score = record.get("curriculum/level", level) + record.get("curriculum/frontier_success", 0.0)
+            else:
+                score = record.get("sim/return", -float("inf"))
             if score > best:
                 best = score
                 torch.save(state, args.out_dir / "best.pt")

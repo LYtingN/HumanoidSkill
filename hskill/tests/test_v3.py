@@ -12,6 +12,7 @@ from hskill.interaction.model import (
     quat_exp,
     quat_log,
 )
+from hskill.learners.critic import ModelCritic
 from hskill.learners.grpo import group_advantages
 from hskill.sim.collect import Episodes, kendall_tau
 from mjlab.utils.lab_api.math import quat_apply, quat_mul
@@ -29,6 +30,25 @@ def _held_can(L: int, W: int, B: int, seed: int = 0):
     quat = quat_mul(hand[..., 3:].reshape(-1, 4), rel.reshape(-1, 4)).view(L + W, B, 4)
     vel = torch.cat([torch.zeros(1, B, 3), (pos[1:] - pos[:-1]) / 0.02])
     return kp, torch.cat([pos, quat, vel], -1)
+
+
+def test_critic_resume_learns_distance_from_an_89_input_checkpoint():
+    old = torch.nn.Module()
+    old.members = torch.nn.ModuleList([torch.nn.Sequential(torch.nn.LayerNorm(89), torch.nn.Linear(89, 1))])
+    optimizer = torch.optim.Adam(old.parameters())
+    features = torch.randn(4, 89)
+    old.members[0](features).sum().backward()
+    optimizer.step()
+
+    critic = ModelCritic(hidden=(), members=1)
+    resumed = torch.optim.Adam(critic.parameters())
+    critic.restore_training_state(old.state_dict(), resumed, optimizer.state_dict())
+    with_distance = torch.cat((features, torch.ones(4, 1)), dim=1)
+    value = critic(with_distance)
+    torch.testing.assert_close(value[0], old.members[0](features).squeeze(-1))
+    value.sum().backward()
+    resumed.step()
+    assert critic.members[0][1].weight[0, -1] != 0
 
 
 def test_object_wm_starts_as_a_rigid_grasp():

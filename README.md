@@ -55,6 +55,46 @@ On the local workstation with the NVIDIA 570 kernel module and newer user-space 
 prefix GPU commands with `LD_LIBRARY_PATH=$HOME/.local/lib/nvidia-570.172.18:$LD_LIBRARY_PATH`,
 as described in the [task documentation](tasks/can_pnp/README.md).
 
+## Five-point FM fine-tuning with FlashSAC
+
+From an environment with the five-point FM and the v0.1 ONNX release under `downloads/`,
+launch one process per GPU on an allocated worker. Each process simulates `--num-envs`
+lockstep worlds (default 32) with batched FM and tracker inference; the FM runs under BF16
+autocast, its training precision, the v0.1 tracker network runs on the GPU (a PyTorch executor
+of its ONNX graph, checked against onnxruntime), and the camera renders only the frames the next
+decision keeps. Replay stores the BF16 FM tokens as BF16. Logs include GPU memory and utilization. Every rank keeps an identical learner replica and its own CPU replay shard; each update
+averages gradients over the ranks, so `--batch-size` is per GPU. One iteration (`step` in the
+logs and TensorBoard) is one FM decision in every world of every GPU. Rank zero logs SAC losses,
+the mean reward per decision, episode returns and stage rates (held, lifted, entered the box,
+placed) to `train.log` and `OUT_DIR/tb`. On AIHC use the `fivepoint-flashsac` profile in `deploy/aihc`.
+
+```bash
+NPROC_PER_NODE=8 bash experiments/launch/train_fivepoint_flashsac.sh --out-dir logs/fivepoint_flashsac
+bash experiments/launch/view_fivepoint_morphmimic.sh --flashsac logs/fivepoint_flashsac/flashsac.pt --phase APPROACH
+```
+
+The reset bank (SGS, arXiv:2610.12465) holds every recorded phase start (APPROACH through
+RELEASE) of each training episode; each world draws its next start i.i.d. by SGS weight, peaked at
+50% success, so the task is learned backwards from near-goal starts. A start's time budget is
+1.5x the demonstration's time from it to RELEASE plus 4 s (capped by `--episode-seconds`).
+`--eval-envs` worlds per GPU run the deterministic policy from every recorded APPROACH start in
+turn (validation episodes reported separately as `eval/val_success`) and feed no training data. The frozen FM encodes two
+camera/proprioception frames. Once per eight control steps the actor selects a bounded
+32 × 47 action which is multiplied by three and passed to the FM as initial noise.
+The tracker uses ten future frames from each plan. The twin categorical Q networks take
+90 measured task features (including right gripper base to can centre distance) and the
+bounded action. The actor starts at an observation-independent tanh-Gaussian whose
+scaled latent has the FM prior's unit variance, so the first learned decisions stay on the FM's
+training distribution. Batch-norm statistics are set from replay before the first update.
+The initial entropy temperature is 0.01 / 1504 because the actor sums
+log probabilities across all noise coordinates. Each decision receives the placement reward plus discounted potential
+shaping. The 20-second time budget is part of the observed state and ends the episode.
+`flashsac.pt` holds the learner, optimizers, reward statistics and SGS history; each
+`collector-rankN.pt` holds that rank's replay shard and random state. `--auto-resume` continues
+from them (replay is dropped if the GPU count changed). `flashsac.pt` also supports
+deterministic rollout. The implementation uses the
+[FlashSAC authors' PyTorch networks and updates](https://github.com/Holiday-Robot/FlashSAC/tree/87edc9061150ae9e962dd84e6544e27a1554b3ab).
+
 ## Run
 
 All commands below run from the workspace root. The existing `can-pnp-check`, `can-pnp-run`

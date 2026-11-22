@@ -61,6 +61,9 @@ class CanPnpEnvCfgArgs:
     njmax: int | None = 600
     scene: CanPnpSceneCfg = field(default_factory=CanPnpSceneCfg)
     enable_time_out: bool = True
+    # End (and auto-reset) worlds whose physics state holds NaN/Inf. With thousands of lockstep
+    # worlds a rare blow-up would otherwise reach the controllers and stop every world.
+    nan_termination: bool = False
 
 
 def _edit_scene_spec(spec: mujoco.MjSpec, scene: CanPnpSceneCfg) -> None:
@@ -185,6 +188,8 @@ def make_env_cfg(a: CanPnpEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     }
     if not a.enable_time_out:
         del terminations["time_out"]
+    if a.nan_termination:
+        terminations["nonfinite_physics"] = TerminationTermCfg(func=base_mdp.nan_detection)
     return ManagerBasedRlEnvCfg(
         scene=make_scene_cfg(a),
         observations=observations,

@@ -42,6 +42,7 @@ data/residual_rl/can_pnp/data/chunk-000/episode_000000.parquet
 
 - `morphmimic/`：两个 MorphMimic tracker、源码及验证记录。
 - `5points_FM/`：五点 FM 权重及源码。
+- `morphmimic-v0.1/`：MorphMimic v0.1 human/five 发布（ONNX 导出与 `source/`），不在 `downloads.zip` 中；2026-11-20 从本机 `downloads/morphmimic-v0.1` 单独上传，未含与 `morphmimic_policy/` 内容重复的 `morphmimic_policy.zip`。`fivepoint-flashsac` 配置使用它。
 - `ODE/`：ODE 权重及其带 carry 的推理实现。
 - `DSRL_finetune_20261116/`：已有实验的 best / last 检查点和训练记录。
 

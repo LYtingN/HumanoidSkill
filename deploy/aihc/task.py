@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 REMOTE_ROOT = "/root/workspace/HumanoidSkill"
-PROFILES = ("supermimic", "can-pnp-dsrl", "can-pnp-v3")
+PROFILES = ("supermimic", "can-pnp-dsrl", "can-pnp-v3", "fivepoint-flashsac")
 
 
 def read_json(path):
@@ -46,11 +46,33 @@ def aihc(site, args):
 def input_paths(profile, settings):
     if profile == "supermimic":
         return [("library", "file")] if settings.get("library") else [("npz_dir", "dir")]
+    if profile == "fivepoint-flashsac":
+        # The FM's frozen inference_source sits beside it; the release holds source/ and the ONNX export.
+        return [("fm", "file"), ("tracker_release", "dir")]
     return [("tracker", "file"), ("diffusion", "file"), ("diffusion_repo", "dir")]
+
+
+RESOURCE_KEYS = ("gpu_count", "cpu", "memory_gib", "shared_memory_gib")
+PRIORITIES = ("high", "normal", "low")
+
+
+def effective_site(site, settings):
+    """Site settings with this profile's optional `resources` and `priority` overrides."""
+    merged = dict(site)
+    merged.update({k: v for k, v in settings.get("resources", {}).items() if k in RESOURCE_KEYS})
+    if "priority" in settings:
+        merged["priority"] = settings["priority"]
+    return merged
 
 
 def blockers(site, profile, settings):
     errors = []
+    overrides = settings.get("resources", {})
+    if not isinstance(overrides, dict) or set(overrides) - set(RESOURCE_KEYS):
+        errors.append(f"resources may only override {', '.join(RESOURCE_KEYS)}")
+    site = effective_site(site, settings if isinstance(overrides, dict) else {})
+    if site.get("priority", "normal") not in PRIORITIES:
+        errors.append(f"priority must be one of {', '.join(PRIORITIES)}")
     for key in ("image", "gpu_resource_name", "pool", "queue", "cfs_instance", "cfs_mount_point"):
         if not site.get(key) or "REPLACE" in site[key]:
             errors.append(f"site.local.json: missing {key}")
@@ -58,7 +80,7 @@ def blockers(site, profile, settings):
         errors.append("Use a versioned training image tag or digest, not latest.")
     if site.get("gpu_resource_name") and not re.fullmatch(r"[a-z0-9.-]+/[a-zA-Z0-9_.-]+", site["gpu_resource_name"]):
         errors.append("gpu_resource_name must be the API resource key, not a GPU display name.")
-    for key in ("gpu_count", "cpu", "memory_gib", "shared_memory_gib"):
+    for key in RESOURCE_KEYS:
         if type(site.get(key)) is not int or site[key] <= 0:
             errors.append(f"{key} must be a positive integer")
     if isinstance(site.get("gpu_count"), int) and site["gpu_count"] > 8:
@@ -74,7 +96,8 @@ def blockers(site, profile, settings):
         errors.append("args must be a JSON array of strings")
     else:
         reserved = ("--log-root", "--run-name", "--out-dir", "--tracker-checkpoint",
-                    "--diffusion-checkpoint", "--diffusion-repo", "--data.library", "--data.npz-dir")
+                    "--diffusion-checkpoint", "--diffusion-repo", "--data.library", "--data.npz-dir",
+                    "--fm", "--tracker-release")
         if any(x.split("=", 1)[0] in reserved for x in args):
             errors.append("Set data/checkpoint/output options through profile fields, not args.")
     return errors
@@ -101,7 +124,7 @@ def job_spec(site, manifest):
                         "replicas": 1, "resources": [{"name": k, "quantity": v} for k, v in resources],
                         "envs": [{"name": "AIHC_USE_EHCA", "value": "true"}],
                         "enableRDMA": False, "hostNetwork": False, "privileged": False},
-            "priority": "normal", "faultTolerance": False, "visibleScope": 0,
+            "priority": site.get("priority", "normal"), "faultTolerance": False, "visibleScope": 0,
             "datasources": [{"type": "cfs", "sourcePath": "/", "mountPath": "/mnt/cfs", "name": "",
                              "options": {"readOnly": False, "cfsInstanceId": site["cfs_instance"],
                                          "cfsMountPoint": site["cfs_mount_point"]}}]}
@@ -192,6 +215,7 @@ def prepare(site, profile, settings):
                     raise ValueError(f"Large source file; put datasets on CFS: {relative}")
                 archive.add(path, arcname=str(relative), recursive=False)
     lock = HERE / "environment/uv.lock"
+    site = effective_site(site, settings)
     manifest = {"name": name, "profile": profile, "settings": settings, "gpu_count": site["gpu_count"],
                 "remote_run": site["cfs_root"] + "/work/HumanoidSkill/runs/" + name,
                 "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),

@@ -76,6 +76,29 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual(args[1], "/mnt/cfs/a b.pt")
         self.assertEqual(args[-2:], ["--iterations", "2"])
 
+    def test_fivepoint_flashsac_profile(self):
+        s = {"fm": "/mnt/cfs/ckpt/5points_FM/fivepoints_fm.pt", "tracker_release": "/mnt/cfs/ckpt/morphmimic-v0.1",
+             "args": ["--steps", "10"]}
+        self.assertEqual(task.blockers(self.site, "fivepoint-flashsac", s), [])
+        args = training_args("fivepoint-flashsac", s, Path("/mnt/cfs/run/outputs"))
+        self.assertEqual(args[:6], ["--fm", s["fm"], "--tracker-release", s["tracker_release"],
+                                    "--out-dir", "/mnt/cfs/run/outputs"])
+        self.assertEqual(args[-2:], ["--steps", "10"])
+        local = dict(s, tracker_release="downloads/morphmimic-v0.1", args=["--fm=/tmp/x.pt"])
+        self.assertEqual(len(task.blockers(self.site, "fivepoint-flashsac", local)), 2)
+
+    def test_profile_resource_and_priority_overrides(self):
+        settings = dict(self.settings, resources={"gpu_count": 4, "cpu": 24, "memory_gib": 250,
+                                                  "shared_memory_gib": 125}, priority="high")
+        self.assertEqual(task.blockers(self.site, "supermimic", settings), [])
+        site = task.effective_site(self.site, settings)
+        spec = task.job_spec(site, {"name": "nyx-test", "remote_run": "/mnt/cfs/x", "source_sha256": "abc"})
+        self.assertEqual([r["quantity"] for r in spec["jobSpec"]["resources"]], [4, 24, 250, 125])
+        self.assertEqual((spec["priority"], spec["jobSpec"]["replicas"]), ("high", 1))
+        self.assertEqual(task.effective_site(self.site, self.settings)["gpu_count"], self.site["gpu_count"])
+        bad = dict(self.settings, resources={"gpu_count": 16, "image": "x"}, priority="urgent")
+        self.assertEqual(len(task.blockers(self.site, "supermimic", bad)), 3)
+
     def test_name_filter_checks_later_pages(self):
         first = {"result": {"total": 101, "jobs": [{"name": "someone-else", "jobId": "job-a"}]}}
         second = {"result": {"total": 101, "jobs": [{"name": "nyx-later", "jobId": "job-b"}]}}

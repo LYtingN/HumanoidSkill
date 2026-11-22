@@ -5,47 +5,89 @@ import torch
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
 from hskill.embodiment import g1_aloha as C
-from hskill.s0.controller import DiffusionObservations, gripper_q
+from hskill.s0.controller import DiffusionObservations, gripper_opening, gripper_q
 from humanoid_diffusion.keypoints import KP_NAMES as FM_POINTS, keypoints_to_world
 from humanoid_diffusion.model import load_policy
-from morphmimic import constants as M
-from morphmimic.model.keypoints import fixed_kp_masks, mask_keypoint_goal, targets_features
-from morphmimic.model.policy import Policy, PolicyCfg
-from morphmimic.model.state import StateParts, join_state
-from morphmimic.train.normalizers import RunningNormalizer, normalize_history
-from morphmimic.train.obs_history import ObsHistory
 
 
 class FivePointPlanner(DiffusionObservations):
+    preview_frames = 10
+
     def __init__(self, env, fm_path: Path):
         self.fm, config = load_policy(fm_path, device=env.device)
         ds = config["dataset"]
         if (env.num_envs != 1 or self.fm.action_dim != 47 or
                 tuple(ds["feature_names"]["observation.state"]) != C.BODY_JOINT_NAMES or
-                tuple(FM_POINTS) != M.KP_NAMES or M.JOINT_NAMES != C.BODY_JOINT_NAMES or
-                self.fm.horizon < self.fm.execute_steps + M.GOAL_K - 1):
+                tuple(FM_POINTS) != ("pelvis", "left_ankle", "right_ankle", "left_wrist", "right_wrist") or
+                self.fm.horizon < self.fm.execute_steps + self.preview_frames - 1):
             raise ValueError("Incompatible FM, preview horizon or G1 joint/keypoint layout")
         super().__init__(env, self.fm.obs_horizon, ds["image_size"], "head_camera")
         self.offset = 0
         self.plan_pos = None
         self.replans = 0
+        self.noise_actor = None
+        self.gripper_hysteresis = None  # (close below, reopen above) m, as in FlashSAC training
+        self.grip_closed = None
 
     @torch.inference_mode()
     def act(self, reset: bool):
-        data = self.robot.data
         images, states = self._push_history(torch.full((1,), reset, device=self.robot.data.joint_pos.device))
+        if reset or self.grip_closed is None:
+            measured = gripper_opening(self.robot.data.joint_pos[:, self.gripper_ids])[:, 1]
+            self.grip_closed = measured < C.GRIPPER_OPEN_WIDTH - 0.005
         if reset or self.plan_pos is None or self.offset == self.fm.execute_steps:
-            prediction = self.fm.predict_action(images, states)
-            self.plan_pos, self.plan_quat = keypoints_to_world(
-                prediction["body_action_pred"], data.body_link_pos_w[:, self.pelvis],
-                data.body_link_quat_w[:, self.pelvis],
-            )
-            self.grip = prediction["gripper_width_pred"]
-            self.offset = 0
-            self.replans += 1
-        window = slice(self.offset, self.offset + M.GOAL_K)
+            if self.noise_actor is None:
+                prediction = self.fm.predict_action(images, states)
+            else:
+                # As in FlashSAC training: the FM runs under BF16 autocast, its training precision.
+                with torch.autocast(device_type=images.device.type, dtype=torch.bfloat16):
+                    cond = self.fm.encode(images, states).float()
+                mean, _ = self.noise_actor.get_mean_and_std(cond.flatten(1), training=False)
+                noise = self.noise_scale * mean.tanh().reshape(1, self.fm.horizon, self.fm.action_dim)
+                with torch.autocast(device_type=images.device.type, dtype=torch.bfloat16):
+                    prediction = self.fm.sample(cond, noise=noise)
+            self.set_prediction(prediction)
+        return self.execute_plan(reset)
+
+    def load_flashsac_actor(self, checkpoint):
+        from hskill.learners.flashsac.network import FlashSACActor
+
+        device = self.fm.obs_center.device
+        weights = torch.load(checkpoint, map_location=device, weights_only=True)
+        if weights.get("algorithm") != "flashsac":
+            raise ValueError("Expected a five-point FlashSAC checkpoint")
+        cfg = weights["config"]
+        if (cfg["obs_dim"], cfg["action_dim"]) != (self.fm.n_tokens * self.fm.n_emb,
+                                                   self.fm.horizon * self.fm.action_dim):
+            raise ValueError("FlashSAC checkpoint and FM dimensions differ")
+        actor = FlashSACActor(cfg["blocks"], cfg["obs_dim"], cfg["actor_width"], cfg["action_dim"],
+                              cfg.get("prior_std"))
+        actor.load_state_dict(weights["actor"])
+        self.noise_actor = actor.to(device).eval().requires_grad_(False)
+        self.noise_scale = weights["noise_scale"]
+        hysteresis = weights.get("gripper_hysteresis")
+        self.gripper_hysteresis = tuple(hysteresis) if hysteresis else None
+
+    def set_prediction(self, prediction):
+        data = self.robot.data
+        self.plan_pos, self.plan_quat = keypoints_to_world(
+            prediction["body_action_pred"], data.body_link_pos_w[:, self.pelvis],
+            data.body_link_quat_w[:, self.pelvis],
+        )
+        self.grip = prediction["gripper_width_pred"]
+        self.offset = 0
+        self.replans += 1
+
+    def execute_plan(self, reset):
+        window = slice(self.offset, self.offset + self.preview_frames)
         body = self.body_action(reset, window)
-        command = torch.cat((body, gripper_q(self.grip[:, self.offset])), dim=-1)
+        width = self.grip[:, self.offset].clone()
+        if self.gripper_hysteresis is not None:
+            close, reopen = self.gripper_hysteresis
+            right = width[:, 1]
+            self.grip_closed = torch.where(right < close, True, torch.where(right > reopen, False, self.grip_closed))
+            width[:, 1] = torch.where(self.grip_closed, 0.0, C.GRIPPER_OPEN_WIDTH)
+        command = torch.cat((body, gripper_q(width)), dim=-1)
         if not torch.isfinite(command).all():
             raise FloatingPointError("Nonfinite MorphMimic or gripper command")
         self.offset += 1
@@ -54,7 +96,16 @@ class FivePointPlanner(DiffusionObservations):
 
 class FivePointController(FivePointPlanner):
     def __init__(self, env, fm_path: Path, tracker_path: Path):
+        from morphmimic import constants as M
+        from morphmimic.model.keypoints import fixed_kp_masks
+        from morphmimic.model.policy import Policy, PolicyCfg
+        from morphmimic.train.normalizers import RunningNormalizer
+        from morphmimic.train.obs_history import ObsHistory
+
         super().__init__(env, fm_path)
+        if (tuple(FM_POINTS) != M.KP_NAMES or M.JOINT_NAMES != C.BODY_JOINT_NAMES
+                or M.GOAL_K != self.preview_frames):
+            raise ValueError("Incompatible MorphMimic joint, keypoint or preview layout")
         ckpt = torch.load(tracker_path, map_location="cpu", weights_only=False, mmap=True)
         cfg = ckpt["cfg"]
         if (cfg["robot"], cfg["kp_interface"], cfg["kp_masking"], ckpt["kp_goal_version"],
@@ -81,6 +132,10 @@ class FivePointController(FivePointPlanner):
         print(f"Loaded {fm_path.name} and {tracker_path.name}, tracker iteration {ckpt['iteration']}")
 
     def body_action(self, reset, window):
+        from morphmimic.model.keypoints import mask_keypoint_goal, targets_features
+        from morphmimic.model.state import StateParts, join_state
+        from morphmimic.train.normalizers import normalize_history
+
         data = self.robot.data
         q, qd = data.joint_pos[:, self.body_ids], data.joint_vel[:, self.body_ids]
         tracked = self.tracked

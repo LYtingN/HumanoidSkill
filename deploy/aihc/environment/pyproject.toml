@@ -15,6 +15,9 @@ dependencies = [
   "torchvision==0.29.1",
   "warp-lang==1.18.0",
   "pytest>=8,<10",
+  # The MorphMimic v0.1 human/five tracker runs its exported ONNX policy on CPU;
+  # its policy_node module also imports zmq at import time.
+  "onnx==1.23.2", "onnxruntime==1.32.0", "pyzmq==27.3.0",
 ]
 
 [tool.uv]

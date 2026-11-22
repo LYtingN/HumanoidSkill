@@ -26,6 +26,8 @@
 
 - `supermimic`：`library` 为 compact library `.pt`，或填写含运动 `.npz` 的 `npz_dir`。两者均有值时使用 `library`。
 - `can-pnp-dsrl` / `can-pnp-v3`：填写 `tracker`、`diffusion` 两个检查点，以及外部 `Humanoid-Diffusion` 源码的 `diffusion_repo`。这些都应是任务能访问的 `/mnt/cfs/...` 路径。外部代码及检查点内部引用的资产也必须备齐；建议固定外部 Git commit。
+- `fivepoint-flashsac`：`fm` 为五点 FM 权重（同目录须有 `inference_source/`），`tracker_release` 为 MorphMimic v0.1 发布目录（含 `source/` 和 `morphmimic_policy/`）。工具固定传入 `--auto-resume`；8 个进程各自采样、各存一份 replay，并同步平均梯度，`--batch-size` 是每卡批量。该入口需要 AIHC 环境中的 `onnxruntime` 和 `pyzmq`（v0.1 的 `policy_node` 在导入时使用）。
+- 可选 `resources`（`gpu_count`、`cpu`、`memory_gib`、`shared_memory_gib`）和 `priority`（`high` / `normal` / `low`）只覆盖该 profile 的任务资源和优先级，其余沿用 `site.local.json`。
 - `args` 是额外训练参数数组，例如 `["--iterations", "100"]`。输出路径和上述数据路径由工具统一传入，避免重复覆盖。
 
 默认申请 48 CPU、500 GiB 内存、250 GiB 共享内存，来自团队八卡任务示例，可以按训练规模修改。它们不是性能保证；队列总空闲卡数也不保证某台机器能提供连续的 8 卡及足够 CPU/内存。
