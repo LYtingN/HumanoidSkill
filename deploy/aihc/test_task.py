@@ -35,6 +35,11 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual(job["resources"][0]["quantity"], 1)
         self.assertIn("train_morphmimic_five.sh", job["command"])
         self.assertIn(settings["human_root"], job["command"])
+        site["gpu_count"] = 2
+        job = task.job_spec(site, manifest)["jobSpec"]
+        self.assertEqual(job["replicas"], 1)
+        self.assertEqual(job["resources"][0]["quantity"], 2)
+        self.assertIn("MORPHMIMIC_GPU_COUNT=2", job["command"])
 
     def test_output_override_and_local_data_rejected(self):
         bad = {"library": "/tmp/private.pt", "args": ["--log-root=/tmp/logs"]}

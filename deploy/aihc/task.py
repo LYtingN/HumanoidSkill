@@ -87,8 +87,6 @@ def blockers(site, profile, settings):
             errors.append(f"{key} must be a positive integer")
     if isinstance(site.get("gpu_count"), int) and site["gpu_count"] > 8:
         errors.append("This launcher supports one node with at most 8 GPUs.")
-    if profile == "morphmimic-five" and site.get("gpu_count") != 1:
-        errors.append("The official single-G1 recipe uses one GPU.")
     if site.get("shared_memory_gib", 0) > site.get("memory_gib", 0):
         errors.append("shared_memory_gib must not exceed memory_gib")
     for key, _ in input_paths(profile, settings):
@@ -119,6 +117,8 @@ def job_spec(site, manifest):
                 settings["checkout"], settings["subset_yaml"], settings["human_root"],
                 remote + "/outputs", *settings.get("args", [])]
         entry = shlex.join(args) + " 2>&1 | tee -a train.log"
+        if site["gpu_count"] > 1:
+            entry = f"MORPHMIMIC_GPU_COUNT={site['gpu_count']} " + entry
     command = "\n".join([
         "set -euo pipefail", "mountpoint -q /mnt/cfs",
         f"cd {q(remote)}", f"echo {q(manifest['source_sha256'] + '  source.tar.gz')} | sha256sum -c -",
@@ -210,7 +210,11 @@ def prepare(site, profile, settings):
     name = "nyx-" + profile + "-" + datetime.datetime.now(datetime.timezone.utc).strftime("%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
     destination = HERE / "runs" / name
     destination.mkdir(parents=True)
-    files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).split(b"\0")
+    if profile == "morphmimic-five":
+        # The pinned training checkout is already on CFS. The container reads these two scripts.
+        files = [b"deploy/aihc/cache.sh", b"experiments/launch/train_morphmimic_five.sh"]
+    else:
+        files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).split(b"\0")
     with tarfile.open(destination / "source.tar.gz", "w:gz") as archive:
         for raw in sorted(set(files)):
             if not raw:
