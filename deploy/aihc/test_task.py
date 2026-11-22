@@ -25,6 +25,17 @@ class SubmissionTests(unittest.TestCase):
         broken.update(image="", gpu_resource_name="NVIDIA RPBZZZ6", gpu_count=24)
         self.assertGreaterEqual(len(task.blockers(broken, "supermimic", self.settings)), 3)
 
+    def test_official_morphmimic_uses_single_gpu_and_own_entrypoint(self):
+        settings = task.read_json(task.HERE / "profiles.example.json")["morphmimic-five"]
+        self.assertEqual(task.blockers(self.site, "morphmimic-five", settings), [])
+        site = task.effective_site(self.site, settings)
+        manifest = {"name": "nyx-test", "remote_run": "/mnt/cfs/test", "source_sha256": "abc",
+                    "profile": "morphmimic-five", "settings": settings}
+        job = task.job_spec(site, manifest)["jobSpec"]
+        self.assertEqual(job["resources"][0]["quantity"], 1)
+        self.assertIn("train_morphmimic_five.sh", job["command"])
+        self.assertIn(settings["human_root"], job["command"])
+
     def test_output_override_and_local_data_rejected(self):
         bad = {"library": "/tmp/private.pt", "args": ["--log-root=/tmp/logs"]}
         self.assertEqual(len(task.blockers(self.site, "supermimic", bad)), 2)

@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 REMOTE_ROOT = "/root/workspace/HumanoidSkill"
-PROFILES = ("supermimic", "can-pnp-dsrl", "can-pnp-v3", "fivepoint-flashsac")
+PROFILES = ("supermimic", "can-pnp-dsrl", "can-pnp-v3", "fivepoint-flashsac", "morphmimic-five")
 
 
 def read_json(path):
@@ -44,6 +44,8 @@ def aihc(site, args):
 
 
 def input_paths(profile, settings):
+    if profile == "morphmimic-five":
+        return [("checkout", "dir"), ("subset_yaml", "file"), ("human_root", "dir")]
     if profile == "supermimic":
         return [("library", "file")] if settings.get("library") else [("npz_dir", "dir")]
     if profile == "fivepoint-flashsac":
@@ -85,6 +87,8 @@ def blockers(site, profile, settings):
             errors.append(f"{key} must be a positive integer")
     if isinstance(site.get("gpu_count"), int) and site["gpu_count"] > 8:
         errors.append("This launcher supports one node with at most 8 GPUs.")
+    if profile == "morphmimic-five" and site.get("gpu_count") != 1:
+        errors.append("The official single-G1 recipe uses one GPU.")
     if site.get("shared_memory_gib", 0) > site.get("memory_gib", 0):
         errors.append("shared_memory_gib must not exceed memory_gib")
     for key, _ in input_paths(profile, settings):
@@ -108,13 +112,20 @@ def job_spec(site, manifest):
     code = f"/tmp/{manifest['name']}/code"
     python = REMOTE_ROOT + "/deploy/aihc/environment/.venv/bin/python"
     q = shlex.quote
+    entry = f"exec {q(python)} {q(code + '/deploy/aihc/launch.py')} {q(remote)}"
+    if manifest.get("profile") == "morphmimic-five":
+        settings = manifest["settings"]
+        args = ["bash", code + "/experiments/launch/train_morphmimic_five.sh",
+                settings["checkout"], settings["subset_yaml"], settings["human_root"],
+                remote + "/outputs", *settings.get("args", [])]
+        entry = shlex.join(args) + " 2>&1 | tee -a train.log"
     command = "\n".join([
         "set -euo pipefail", "mountpoint -q /mnt/cfs",
         f"cd {q(remote)}", f"echo {q(manifest['source_sha256'] + '  source.tar.gz')} | sha256sum -c -",
         f"mkdir -p {q(code)}", f"tar -xzf source.tar.gz -C {q(code)}",
         f"export NYX_CFS_ROOT={q(site['cfs_root'])}",
         f"source {q(code + '/deploy/aihc/cache.sh')}",
-        f"exec {q(python)} {q(code + '/deploy/aihc/launch.py')} {q(remote)}",
+        entry,
     ])
     resources = [(site.get("gpu_resource_name") or "UNSET_GPU_RESOURCE", site["gpu_count"]),
                  ("cpu", site["cpu"]), ("memory", site["memory_gib"]),

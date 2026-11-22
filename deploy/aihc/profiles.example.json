@@ -16,6 +16,12 @@
     "diffusion_repo": "",
     "args": ["--num-envs", "512"]
   },
+  "morphmimic-five": {
+    "checkout": "/mnt/cfs/usr/nyx/code/morphmimic-v0.1",
+    "subset_yaml": "/mnt/cfs/usr/nyx/data/morphmimic/seed_g1_npz50/subsets/all.yaml",
+    "human_root": "/mnt/cfs/usr/nyx/data/morphmimic/seed_g1_npz50/human50",
+    "resources": {"gpu_count": 1, "cpu": 16, "memory_gib": 192, "shared_memory_gib": 64}
+  },
   "fivepoint-flashsac": {
     "fm": "",
     "tracker_release": "",
