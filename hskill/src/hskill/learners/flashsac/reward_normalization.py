@@ -2,20 +2,6 @@ import torch
 
 
 
-def _update_reward_stats(
-    reward: torch.Tensor,
-    terminated: torch.Tensor,
-    truncated: torch.Tensor,
-    G_r: torch.Tensor,
-    G_r_max: torch.Tensor,
-    gamma: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    done = torch.logical_or(terminated, truncated).float()
-    new_G_r = gamma * (1.0 - done) * G_r + reward
-    new_G_r_max = torch.maximum(G_r_max, torch.max(torch.abs(new_G_r)))
-    return new_G_r, new_G_r_max
-
-
 def _scale_reward(
     rewards: torch.Tensor,
     G_var: torch.Tensor,
@@ -95,15 +81,10 @@ class RewardNormalizer:
         terminated: torch.Tensor,
         truncated: torch.Tensor,
     ) -> None:
-        self.G_r, self.G_r_max = _update_reward_stats(
-            reward=reward,
-            terminated=terminated,
-            truncated=truncated,
-            G_r=self.G_r,
-            G_r_max=self.G_r_max,
-            gamma=self.gamma,
-        )
-        self.G_rms.update(self.G_r)
+        returns = self.gamma * self.G_r + reward
+        self.G_r_max = torch.maximum(self.G_r_max, returns.abs().max())
+        self.G_rms.update(returns)
+        self.G_r = returns.masked_fill(terminated.bool() | truncated.bool(), 0.)
 
     def normalize_rewards(self, rewards: torch.Tensor) -> torch.Tensor:
         normalized_rewards = _scale_reward(

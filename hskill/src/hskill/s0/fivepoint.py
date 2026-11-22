@@ -67,6 +67,7 @@ class FivePointPlanner(DiffusionObservations):
         self.noise_scale = weights["noise_scale"]
         hysteresis = weights.get("gripper_hysteresis")
         self.gripper_hysteresis = tuple(hysteresis) if hysteresis else None
+        return weights.get("episode_seconds", 30.)
 
     def set_prediction(self, prediction):
         data = self.robot.data

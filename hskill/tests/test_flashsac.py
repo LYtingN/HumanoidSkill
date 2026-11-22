@@ -127,3 +127,27 @@ def test_replay_bf16_storage_round_trip():
     assert restored.fields["actor_observation"].dtype == torch.bfloat16
     assert restored.sample(4, "cpu")["actor_observation"].dtype == torch.float32
     torch.testing.assert_close(replay.fields["actor_observation"][:4].float(), obs)
+
+
+def test_discounted_return_statistics_reset_after_terminal_reward():
+    from hskill.learners.flashsac.reward_normalization import RewardNormalizer
+
+    norm = RewardNormalizer(.99, 5., False, torch.device("cpu"))
+    for reward, done in [(1., False), (10., True), (0., False)]:
+        norm.update_reward_stats(torch.tensor([reward]), torch.tensor([done]), torch.tensor([False]))
+    torch.testing.assert_close(norm.G_r, torch.zeros(1))
+    torch.testing.assert_close(norm.G_r_max, torch.tensor([10.99]))
+    torch.testing.assert_close(norm.G_rms.mean, torch.tensor([(1 + 10.99) / 3]))
+
+
+def test_absorbing_observations_never_reach_batch_norm_or_targets():
+    for n, done in [(1, [1.]), (3, [0., 1., 0.]), (2, [1., 1.])]:
+        batch = _batch(n)
+        batch["terminated"] = torch.tensor(done)
+        for key in ("actor_next_observation", "next_observation"):
+            batch[key][batch["terminated"].bool()] = math.nan
+        learner = FlashSAC(12, 9, 4, "cpu", actor_width=8, critic_width=8, blocks=1)
+        learner.calibrate(batch)
+        assert all(math.isfinite(x) for x in learner.update(batch).values())
+        for net in (learner.actor, learner.critic, learner.target):
+            assert all(t.isfinite().all() for t in net.network.state_dict().values())

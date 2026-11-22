@@ -183,14 +183,14 @@ class FlashSAC:
         ``act`` and the actor loss's critic use running statistics. Without this they would start
         from mean 0 / variance 1 and approach the data at momentum 0.01 per update.
         """
-        actor_obs = torch.cat([batch["actor_observation"], batch["actor_next_observation"]])
+        actor_obs = torch.cat([batch["actor_observation"], batch["actor_next_observation"][~batch["terminated"].bool()]])
         for network, kwargs in ((self.actor, dict(observations=actor_obs)),
                                 (self.critic, dict(observations=batch["observation"], actions=batch["action"]))):
             norms = _batch_norms(network.network)
             momenta = [m.momentum for m in norms]
             for m in norms:
                 m.momentum = 1.0
-            network.network(**kwargs, training=True)
+            network.network(**kwargs, training=len(kwargs["observations"]) > 1)
             for m, momentum in zip(norms, momenta):
                 m.momentum = momentum
             _average_buffers(network.network)

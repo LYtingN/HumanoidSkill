@@ -99,7 +99,7 @@ def main():
     parser.add_argument("--episode", type=int, default=3)
     parser.add_argument("--phase", choices=["WALK", "APPROACH", "REACH", "CLOSE", "LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE"],
                         help="WALK uses the scene layout; APPROACH uses the recorded episode start")
-    parser.add_argument("--seconds", type=float, help="Optional run duration in simulation seconds (recording default: 14)")
+    parser.add_argument("--seconds", type=float, help="Optional run duration in simulation seconds (recording default: training cap for FlashSAC, otherwise 14 s)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--record", type=Path, help="Save one rollout to this MP4 and exit")
     parser.add_argument("--measured-gripper", action=argparse.BooleanOptionalAction, default=True,
@@ -118,7 +118,7 @@ def main():
     if args.seconds is not None and (not math.isfinite(args.seconds) or args.seconds <= 0):
         parser.error("--seconds must be positive")
     phase = args.phase or ("APPROACH" if args.flashsac else "CLOSE" if args.record else "WALK")
-    seconds = 14 if args.record and args.seconds is None else args.seconds
+    seconds = args.seconds
     torch.manual_seed(args.seed)
     geometry = SceneGeometryCfg(can_mass=.1)
     scene = CanPnpSceneCfg(geometry=geometry, camera=HeadCameraCfg(width=320, height=240))
@@ -138,7 +138,9 @@ def main():
             tracker_label = args.tracker.stem
         controller.gripper_hysteresis = tuple(args.gripper_hysteresis) if args.gripper_hysteresis else None
         if args.flashsac:
-            controller.load_flashsac_actor(args.flashsac)
+            training_seconds = controller.load_flashsac_actor(args.flashsac)
+        if args.record and seconds is None:
+            seconds = training_seconds if args.flashsac else 14.
         starts = GraspStarts(phase=phase, measured_gripper=args.measured_gripper) if phase != "WALK" else None
         ids = torch.tensor([0], device=env.device)
         if starts is not None:

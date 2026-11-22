@@ -94,6 +94,7 @@ class FivePointTask:
         self.spec = StateSpec(StateSpecCfg(), device)
         self.fingers = [env.scene[f"finger_{side}_can_contacts"] for side in ("l", "r")]
         self.row = torch.zeros(self.n, dtype=torch.long)
+        self.policy_episode = torch.ones(self.n, dtype=torch.bool, device=device)
         self.steps = torch.zeros(self.n, dtype=torch.long, device=device)
         self.episode_return = torch.zeros(self.n, device=device)
         self.held_any = torch.zeros(self.n, dtype=torch.bool, device=device)
@@ -153,6 +154,7 @@ class FivePointTask:
         else:
             for name in TRACKER_ROWS:
                 getattr(self.task, name)[ids] = getattr(fresh, name)[ids]
+        self.policy_episode[ids] = True
         self.steps[ids] = 0
         self.episode_return[ids] = 0
         self.held_any[ids] = False
@@ -164,7 +166,9 @@ class FivePointTask:
         return (self.ctrl.robot.data.body_link_pos_w[:, self.right_eef] - self.can.root_link_pos_w).norm(dim=-1)
 
     @torch.no_grad()
-    def step(self, obs, state, action):
+    def step(self, obs, state, action, *, policy_controlled):
+        if not policy_controlled:
+            self.policy_episode.zero_()
         ctrl, fm, task, n = self.ctrl, self.ctrl.fm, self.task, self.n
         cond = obs.reshape(n, fm.n_tokens, fm.n_emb)
         # Q and replay use the bounded SAC action. Only the FM receives the scaled latent.
@@ -203,13 +207,14 @@ class FivePointTask:
                 break  # every world restarts, which refreshes its history
         ctrl.render = True
         done = ~live
-        # An auto-reset has already destroyed the terminal observation. Its bootstrap is masked.
+        # Finished worlds have no bootstrap state. Mark them absorbing, including worlds
+        # that finished early and idled while the rest of the chunk executed.
         next_obs, next_state = self.observation()
-        keep = auto_any[:, None]
-        next_obs, next_state = torch.where(keep, obs, next_obs), torch.where(keep, state, next_state)
+        next_obs.masked_fill_(done[:, None], 0.)
+        next_state.masked_fill_(done[:, None], 0.)
         phi = torch.where(terminal, 0., task.shaping())
         reward = task.terminal_reward() + self.gamma * phi - before
-        self.sampler.observe(self.row, task.placed, done & ~self.eval_mask)
+        self.sampler.observe(self.row, task.placed, done & ~self.eval_mask & self.policy_episode)
         self.episode_return += reward
         stats = torch.stack([self.episode_return, self.steps.float() * self.env.step_dt,
                              *(x.float() for x in (task.placed, self.held_any, task.lifted, task.entered,
@@ -273,7 +278,7 @@ def save_state(args, step, rank, world, device, learner, replay, task):
     if rank == 0:
         ckpt = dict(**learner.checkpoint(), step=step, decisions=step * world * task.n, world=world, num_envs=task.n,
                     noise_scale=NOISE_SCALE, sampler=task.sampler.state_dict(),
-                    gripper_hysteresis=args.gripper_hysteresis or None, measured_gripper=args.measured_gripper,
+                    episode_seconds=args.episode_seconds, gripper_hysteresis=args.gripper_hysteresis or None, measured_gripper=args.measured_gripper,
                     fm=str(args.fm), tracker_release=str(args.tracker_release))
         atomic_save(ckpt, args.out_dir / "flashsac.pt")
         if args.snapshot_every and step % args.snapshot_every == 0:
@@ -387,7 +392,7 @@ def train(args, device, rank, world):
             if eval_mask.any():
                 action[eval_mask] = learner.act_deterministic(obs[eval_mask])
             tick = time.perf_counter()
-            transition = task.step(obs, state, action)
+            transition = task.step(obs, state, action, policy_controlled=learner.updates > 0)
             collect_s += time.perf_counter() - tick
             stats, done_all = task.finished
             evaluated = done_all & eval_mask

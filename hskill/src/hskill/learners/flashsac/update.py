@@ -1,3 +1,4 @@
+import math
 from typing import Any, Optional
 
 import torch
@@ -101,15 +102,15 @@ def update_actor(
     """
 
     with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-        actor_obs_all = torch.cat([batch["actor_observation"], batch["actor_next_observation"]], dim=0)  # type: ignore
+        actor_obs_all = torch.cat([batch["actor_observation"], batch["actor_next_observation"][~batch["terminated"].bool()]], dim=0)
         actions_all, info = actor(
             observations=actor_obs_all,
-            training=True,
+            training=len(actor_obs_all) > 1,
         )
         log_probs_all = info["log_prob"]
 
-        actions = torch.chunk(actions_all, 2, dim=0)[0]
-        log_probs = torch.chunk(log_probs_all, 2, dim=0)[0]
+        actions = actions_all[:len(batch["action"])]
+        log_probs = log_probs_all[:len(batch["action"])]
 
         # Disable critic gradients to prevent CUDA graph overwriting
         critic.network.requires_grad_(False)
@@ -199,30 +200,21 @@ def update_critic(
     with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
         # Compute target values
         with torch.no_grad():
-            next_actions, info = actor(
-                observations=batch["actor_next_observation"],
-                training=False,
-            )
-            # Clone variables to prevent overwriting
-            next_actions = next_actions.clone()
-            next_actor_log_probs = info["log_prob"].clone()
-
-            temp_value = temperature()
-
-            next_actor_entropy = temp_value * next_actor_log_probs
-            obs_all = torch.cat([batch["observation"], batch["next_observation"]], dim=0)  # type: ignore
-            act_all = torch.cat([batch["action"], next_actions], dim=0)  # type: ignore
-
-            # qs_all: (2, 2*B)
-            # q_infos_all['log_probs']: (2, 2*B, num_bins)
-            qs_all, q_infos_all = target_critic(
-                observations=obs_all,
-                actions=act_all,
-                training=True,
-            )
-            next_qs = qs_all.chunk(2, dim=1)[1]
-            next_q_log_probs = q_infos_all["log_prob"].chunk(2, dim=1)[1]
-            next_q_log_probs = _select_min_q_log_probs(next_qs, next_q_log_probs)
+            # Absorbing transitions contribute only their immediate reward. Exclude their
+            # successor rows before every network call, including cross-batch normalization.
+            live = ~batch["terminated"].bool()
+            size = len(live)
+            next_obs = batch["next_observation"][live]
+            obs_all = torch.cat((batch["observation"], next_obs))
+            act_all = batch["action"]
+            next_actor_entropy = batch["reward"].new_zeros(size)
+            next_q_log_probs = batch["reward"].new_full((size, num_bins), -math.log(num_bins))
+            if len(next_obs):
+                next_actions, info = actor(batch["actor_next_observation"][live], training=False)
+                act_all = torch.cat((act_all, next_actions))
+                next_actor_entropy[live] = temperature() * info["log_prob"]
+                qs, info = target_critic(obs_all, act_all, training=True)
+                next_q_log_probs[live] = _select_min_q_log_probs(qs[:, size:], info["log_prob"][:, size:])
 
             # Compute target probs
             target_probs = _compute_categorical_td_target(
@@ -241,9 +233,9 @@ def update_critic(
         pred_qs_all, pred_q_infos = critic(
             observations=obs_all,
             actions=act_all,
-            training=True,
+            training=len(obs_all) > 1,
         )
-        pred_log_probs = torch.chunk(pred_q_infos["log_prob"], 2, dim=1)[0]
+        pred_log_probs = pred_q_infos["log_prob"][:, :size]
 
         ce_loss = -(target_probs.unsqueeze(0) * pred_log_probs).sum(dim=-1)  # (2, B)
         critic_loss = ce_loss.mean()
