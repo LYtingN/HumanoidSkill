@@ -11,10 +11,12 @@ class SuccessGuidedSampler:
         self.rows = torch.as_tensor(train_rows, dtype=torch.long)
         self.phase_ids = starts.phase_ids[self.rows]
         self.phase_count = len(starts.phases)
-        self.configs = [(starts.phases[phase], starts.episode_ids[row])
+        # A configuration is (phase, episode); dense starts (several per phase and episode) add the frame.
+        dense = hasattr(starts, "phase_start")
+        self.configs = [(starts.phases[phase], starts.episode_ids[row]) + ((int(starts.frame[row]),) if dense else ())
                         for row, phase in zip(self.rows.tolist(), self.phase_ids.tolist(), strict=True)]
         if len(set(self.configs)) != len(self.configs) or not self.configs:
-            raise ValueError("SGS needs distinct, nonempty (phase, episode) training starts")
+            raise ValueError("SGS needs distinct, nonempty training starts")
         self.history = {row: deque(maxlen=100) for row in self.rows.tolist()}
         # All ranks select the same phase so a synchronous rollout has one phase-specific time limit.
         self.phase_rng = torch.Generator().manual_seed(seed)
@@ -78,7 +80,7 @@ class SuccessGuidedSampler:
                 "phase_rng": self.phase_rng.get_state()}
 
     def load_state_dict(self, state):
-        if state["configs"] != self.configs:
+        if [tuple(c) for c in state["configs"]] != self.configs:
             raise ValueError("SGS checkpoint and training reset configurations differ")
         for history, values in zip(self.history.values(), state["history"], strict=True):
             history.clear()

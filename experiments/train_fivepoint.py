@@ -44,8 +44,9 @@ class FivePointTask:
     ``margin`` seconds, capped at ``seconds``."""
 
     def __init__(self, env, controller, geometry, seconds, gamma, seed, sampler_seed,
-                 phases=PHASES, slack=1.5, margin=4.0, eval_envs=0, eval_offset=0, measured_gripper=True):
-        from can_pnp.starts import GraspStarts, VAL_EPISODES
+                 phases=PHASES, slack=1.5, margin=4.0, eval_envs=0, eval_offset=0, measured_gripper=True,
+                 reach_weight=0.0, dense_starts=False):
+        from can_pnp.starts import DenseStarts, GraspStarts, VAL_EPISODES
         from hskill.data.sgs import SuccessGuidedSampler
         from hskill.embodiment.g1_aloha import KEYPOINT_BODIES, RIGHT_EEF
         from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
@@ -55,17 +56,26 @@ class FivePointTask:
         self.gamma = gamma
         if "RELEASE" not in phases:
             raise ValueError("Time budgets are measured to the RELEASE phase; include it")
-        self.starts = GraspStarts(phase=tuple(phases), measured_gripper=measured_gripper)
+        # Dense starts: every 0.5 s of each episode (measured gripper openings), labelled by phase.
+        self.starts = (DenseStarts(phase=tuple(phases)) if dense_starts
+                       else GraspStarts(phase=tuple(phases), measured_gripper=measured_gripper))
+        phase_start = getattr(self.starts, "phase_start", torch.ones(len(self.starts), dtype=torch.bool))
         rows = [i for i, ep in enumerate(self.starts.episode_ids) if ep not in VAL_EPISODES]
         self.sampler = SuccessGuidedSampler(self.starts, rows, sampler_seed)
         # Per configuration: demonstration seconds from its start to the same episode's RELEASE.
-        release = {ep: f for ep, f, ph in zip(self.starts.episode_ids, self.starts.frame.tolist(),
-                                               self.starts.phase_ids.tolist()) if phases[ph] == "RELEASE"}
+        release = {ep: f for ep, f, ph, first in zip(self.starts.episode_ids, self.starts.frame.tolist(),
+                                                      self.starts.phase_ids.tolist(), phase_start.tolist())
+                   if phases[ph] == "RELEASE" and first}
         demo_s = torch.tensor([(release[ep] - f) / 50.0 for ep, f in zip(self.starts.episode_ids,
                                                                         self.starts.frame.tolist())])
         budget_s = (slack * demo_s.clamp_min(0) + margin).clamp_max(seconds)
         self.budget = (budget_s / env.step_dt).round().long().clamp_min(1).to(device)
         self.phase_names = tuple(phases)
+        # Reach shaping (weight 0: off). Before the can is first held, a potential of the right gripper's
+        # distance to the can beyond the held distance; once held it stays at its maximum, so grasping
+        # never lowers the potential. Starts recorded with the can in hand begin at the maximum.
+        self.reach_weight = reach_weight
+        self.held_start = torch.tensor([p in HELD_PHASES for p in self.phase_names], device=env.device)
         print("Episode budget per phase (s, median): " + ", ".join(
             f"{p} {budget_s[self.starts.phase_ids == i].median().item():.1f}" for i, p in enumerate(phases)), flush=True)
         self.limit = torch.ones(self.n, dtype=torch.long, device=device)
@@ -80,7 +90,8 @@ class FivePointTask:
         self.eval_mask = torch.zeros(self.n, dtype=torch.bool, device=device)
         self.eval_mask[self.n - eval_envs:] = True
         approach = phases.index("APPROACH") if "APPROACH" in phases else -1
-        self.eval_rows = torch.tensor([i for i, ph in enumerate(self.starts.phase_ids.tolist()) if ph == approach])
+        self.eval_rows = torch.tensor([i for i, (ph, first) in enumerate(zip(self.starts.phase_ids.tolist(), phase_start.tolist()))
+                                       if ph == approach and first])
         self.eval_val = torch.tensor([ep in VAL_EPISODES for ep in self.starts.episode_ids])
         self.eval_cursor = eval_offset
         self.generator = torch.Generator().manual_seed(seed)
@@ -98,6 +109,7 @@ class FivePointTask:
         self.steps = torch.zeros(self.n, dtype=torch.long, device=device)
         self.episode_return = torch.zeros(self.n, device=device)
         self.held_any = torch.zeros(self.n, dtype=torch.bool, device=device)
+        self.grasped = torch.zeros(self.n, dtype=torch.bool, device=device)
         self.min_grip = torch.full((self.n,), math.inf, device=device)
         self.task = None
         self.finished = None  # (stats (n, len(EPISODE_STATS)), done mask) of the last step
@@ -158,12 +170,24 @@ class FivePointTask:
         self.steps[ids] = 0
         self.episode_return[ids] = 0
         self.held_any[ids] = False
+        self.grasped[ids] = self.held_start[self.phase[ids]]
         self.min_grip[ids] = math.inf
         self.ctrl.reset_worlds(ids)
         return self.observation(ids)
 
     def gripper_can_distance(self):
         return (self.ctrl.robot.data.body_link_pos_w[:, self.right_eef] - self.can.root_link_pos_w).norm(dim=-1)
+
+    def reach_potential(self):
+        """In [0, 1]: 1 once the can has been held, else of the gripper's distance beyond the held distance."""
+        excess = (self.gripper_can_distance() - HELD_DISTANCE).clamp_min(0.)
+        phi = sum(w * torch.exp(-excess / s) for s, w in zip(REACH_SCALES, (.5, .5)))
+        return torch.where(self.grasped, 1., phi)
+
+    def potential(self):
+        """Shaping potential: the can's distance to the goal, plus the weighted reach potential."""
+        phi = self.task.shaping()
+        return phi + self.reach_weight * self.reach_potential() if self.reach_weight else phi
 
     @torch.no_grad()
     def step(self, obs, state, action, *, policy_controlled):
@@ -174,7 +198,7 @@ class FivePointTask:
         # Q and replay use the bounded SAC action. Only the FM receives the scaled latent.
         noise = NOISE_SCALE * action.reshape(n, fm.horizon, fm.action_dim)
         ctrl.set_plan(ctrl.sample(cond, noise))
-        before = task.shaping()
+        before = self.potential()
         live = torch.ones(n, dtype=torch.bool, device=obs.device)
         terminal = torch.zeros_like(live)
         auto_any = torch.zeros_like(live)
@@ -195,6 +219,7 @@ class FivePointTask:
             accounted = live & ~auto
             task.step(self.can.root_link_pos_w, self.can.root_link_quat_w, released, accounted, held)
             self.held_any |= held & accounted
+            self.grasped |= held & accounted
             self.min_grip = torch.where(accounted, torch.minimum(self.min_grip, self.gripper_can_distance()),
                                         self.min_grip)
             ends = live & (auto | task.placed | task.toppled)
@@ -212,7 +237,7 @@ class FivePointTask:
         next_obs, next_state = self.observation()
         next_obs.masked_fill_(done[:, None], 0.)
         next_state.masked_fill_(done[:, None], 0.)
-        phi = torch.where(terminal, 0., task.shaping())
+        phi = torch.where(terminal, 0., self.potential())
         reward = task.terminal_reward() + self.gamma * phi - before
         self.sampler.observe(self.row, task.placed, done & ~self.eval_mask & self.policy_episode)
         self.episode_return += reward
@@ -226,6 +251,11 @@ class FivePointTask:
 
 
 NOISE_SCALE = 3.0  # FM latent = NOISE_SCALE * bounded SAC action
+# Reach shaping: the right gripper base sits ~8.5 cm from the can's centre when it holds the can
+# (CLOSE / LIFT starts); REACH starts are ~33 cm and APPROACH ~63 cm away.
+HELD_DISTANCE = 0.085
+REACH_SCALES = (0.1, 0.5)  # m, exponential length scales of the reach potential (weights 0.5, 0.5)
+HELD_PHASES = ("LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE")  # recorded with the can in hand
 
 
 def gather(value, world):
@@ -278,7 +308,7 @@ def save_state(args, step, rank, world, device, learner, replay, task):
     if rank == 0:
         ckpt = dict(**learner.checkpoint(), step=step, decisions=step * world * task.n, world=world, num_envs=task.n,
                     noise_scale=NOISE_SCALE, sampler=task.sampler.state_dict(),
-                    episode_seconds=args.episode_seconds, gripper_hysteresis=args.gripper_hysteresis or None, measured_gripper=args.measured_gripper,
+                    episode_seconds=args.episode_seconds, reach_weight=args.reach_weight, dense_starts=args.dense_starts, gripper_hysteresis=args.gripper_hysteresis or None, measured_gripper=args.measured_gripper,
                     fm=str(args.fm), tracker_release=str(args.tracker_release))
         atomic_save(ckpt, args.out_dir / "flashsac.pt")
         if args.snapshot_every and step % args.snapshot_every == 0:
@@ -345,7 +375,8 @@ def train(args, device, rank, world):
         task = FivePointTask(env, ctrl, geometry, args.episode_seconds, args.gamma, seed, args.seed,
                              phases=tuple(args.phases), slack=args.time_slack, margin=args.time_margin,
                              eval_envs=args.eval_envs, eval_offset=rank * args.eval_envs,
-                             measured_gripper=args.measured_gripper)
+                             measured_gripper=args.measured_gripper, reach_weight=args.reach_weight,
+                             dense_starts=args.dense_starts)
         action_dim = fm.horizon * fm.action_dim
         # Every rank owns a learner replica (gradients are averaged) and a replay shard.
         torch.manual_seed(args.seed)
@@ -514,6 +545,12 @@ def main():
     p.add_argument("--target-std", type=float, default=.15,
                    help="Pre-tanh std defining the SAC target entropy (the FM prior is about 0.36)")
     p.add_argument("--gamma", type=float, default=.99, help="Discount per FM decision")
+    p.add_argument("--dense-starts", action=argparse.BooleanOptionalAction, default=False,
+                   help="Reset bank of every 0.5 s of each recorded episode up to RELEASE (labelled by phase) "
+                        "instead of the phase starts only")
+    p.add_argument("--reach-weight", type=float, default=1.0,
+                   help="Weight of the potential-based reach shaping (gripper-to-can distance until the can "
+                        "is first held; 0 disables). The can-to-goal shaping has weight 1")
     p.add_argument("--episode-seconds", type=float, default=30., help="Cap on every configuration's time budget")
     p.add_argument("--phases", nargs="+", default=list(PHASES), choices=PHASES,
                    help="Recorded start phases in the SGS reset bank (one configuration per phase and training episode)")
@@ -544,6 +581,7 @@ def main():
     args = p.parse_args()
     world = int(os.environ.get("WORLD_SIZE", 1))
     if (not 0 < args.gamma <= 1 or not math.isfinite(args.episode_seconds) or args.episode_seconds <= 0
+            or not (math.isfinite(args.reach_weight) and args.reach_weight >= 0)
             or args.capacity < args.warmup or args.warmup < 2 * world or args.snapshot_every < 0
             or not 0 < args.target_std < 7 or args.time_slack <= 0 or args.time_margin < 0 or min(args.batch_size, args.steps, args.log_every,
                 args.save_every, args.updates_per_step, args.calibration_size - 1, args.num_envs, args.fm_batch) < 1

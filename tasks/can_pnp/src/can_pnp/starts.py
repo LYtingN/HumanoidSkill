@@ -28,6 +28,9 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 GRASP_STARTS = Path(__file__).parent / "scene" / "assets" / "grasp_starts.json"
+# Every 0.5 s of every episode up to RELEASE (scripts/extract_dense_starts.py): the phase starts above
+# plus states replayed from the LeRobot export, with measured gripper openings.
+DENSE_STARTS = Path(__file__).parent / "scene" / "assets" / "grasp_starts_dense.json"
 # Measured (not commanded) gripper openings at the same starts (scripts/extract_measured_gripper.py).
 MEASURED_GRIPPER = Path(__file__).parent / "scene" / "assets" / "grasp_starts_gripper_measured.json"
 
@@ -74,8 +77,47 @@ class GraspStarts:
         return len(self.episode_ids)
 
 
+class DenseStarts:
+    """Starts every ``stride`` frames of each episode (``extract_dense_starts.py``), labelled with the
+    phase they fall in. Same attributes as :class:`GraspStarts`, plus ``phase_start`` (the row is the
+    recorded first frame of its phase); ``gripper_opening`` is measured. Rows phase-major, then by
+    episode and frame."""
+
+    def __init__(self, path: str | Path = DENSE_STARTS, phase: str | tuple[str, ...] = "CLOSE"):
+        doc = json.loads(Path(path).read_text())
+        if tuple(doc["joint_names"]) != C.BODY_JOINT_NAMES:
+            raise ValueError("Dense starts use a different body joint order")
+        self.phase = phase
+        self.phases = (phase,) if isinstance(phase, str) else tuple(phase)
+        rows = []
+        for p_i, name in enumerate(self.phases):
+            for e in sorted(int(k) for k in doc["episodes"]):
+                ep = doc["episodes"][str(e)]
+                rows += [(p_i, e, ep, s) for s in ep["starts"] if s["phase"] == name]
+        if not rows:
+            raise ValueError(f"No dense starts in phases {self.phases}")
+        self.episode_ids = [e for _, e, _, _ in rows]
+        self.phase_ids = torch.tensor([p for p, _, _, _ in rows])
+        self.frame = torch.tensor([s["frame"] for _, _, _, s in rows])
+        self.phase_start = torch.tensor([s["phase_start"] for _, _, _, s in rows])
+
+        def stack(key: str) -> torch.Tensor:
+            return torch.tensor([s[key] for _, _, _, s in rows], dtype=torch.float32)
+
+        self.table_front_x = torch.tensor([ep["table_front_x"] for _, _, ep, _ in rows], dtype=torch.float32)
+        self.table_center_y = torch.tensor([ep["table_center_y"] for _, _, ep, _ in rows], dtype=torch.float32)
+        self.root_pos, self.root_quat = stack("root_pos"), stack("root_quat")
+        self.can_pos, self.can_quat = stack("can_pos"), stack("can_quat")
+        self.shelf_can_pos, self.shelf_can_quat = stack("shelf_can_pos"), stack("shelf_can_quat")
+        self.joint_pos = stack("joint_pos")
+        self.gripper_opening = stack("gripper_opening")  # left, right (m), measured
+
+    def __len__(self) -> int:
+        return len(self.episode_ids)
+
+
 def apply_grasp_start(
-    env: ManagerBasedRlEnv, env_ids: torch.Tensor, starts: GraspStarts, rows: torch.Tensor
+    env: ManagerBasedRlEnv, env_ids: torch.Tensor, starts: GraspStarts | DenseStarts, rows: torch.Tensor
 ) -> None:
     """Write recorded start ``rows`` (indices into ``starts``) into ``env_ids``, then refresh
     the simulation and the observation history of those envs."""

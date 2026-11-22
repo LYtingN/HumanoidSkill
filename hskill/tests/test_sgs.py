@@ -44,3 +44,14 @@ def test_sgs_iid_sampling_follows_weights():
     assert share[2] > 4 * share[0] and share[3] > 4 * share[1]  # the learning zone dominates
     metrics = sampler.phase_metrics()
     assert abs(metrics[1][0] - 0.5) < 1e-6 and metrics[1][1] > 0.8
+
+
+def test_sgs_dense_starts_key_configurations_by_frame():
+    # Dense starts repeat (phase, episode) at several frames; each frame is its own configuration.
+    starts = SimpleNamespace(phases=("TURN_WALK",), phase_ids=torch.tensor([0, 0, 0]), episode_ids=[4, 4, 5],
+                             frame=torch.tensor([100, 125, 90]), phase_start=torch.tensor([True, False, True]))
+    sampler = SuccessGuidedSampler(starts, [0, 1, 2], seed=0)
+    assert sampler.configs == [("TURN_WALK", 4, 100), ("TURN_WALK", 4, 125), ("TURN_WALK", 5, 90)]
+    restored = SuccessGuidedSampler(starts, [0, 1, 2], seed=1)
+    restored.load_state_dict({**sampler.state_dict(), "configs": [list(c) for c in sampler.configs]})
+    assert restored.configs == sampler.configs
