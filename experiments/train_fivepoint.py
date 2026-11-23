@@ -22,13 +22,13 @@ from hskill.learners.flashsac.learner import FlashSAC, Replay
 
 
 # Per-episode outcomes summed over a log window (means are reported).
-EPISODE_STATS = ("return", "length_s", "success", "held", "lifted", "entered_box", "toppled",
+EPISODE_STATS = ("return", "length_s", "success", "held", "lifted", "entered_box", "toppled", "thrown",
                  "env_terminated", "min_gripper_can_m", "min_can_goal_m")
-PHASE_STATS = ("success", "held", "lifted", "entered_box", "toppled", "env_terminated", "return")
+PHASE_STATS = ("success", "held", "lifted", "entered_box", "toppled", "thrown", "env_terminated", "return")
 
 
 TRACKER_ROWS = ("box", "goal", "origin_z", "lifted", "entered", "placed", "toppled", "hold", "tilted",
-                "final_dist", "min_dist", "last_pos")
+                "thrown", "flung", "final_dist", "min_dist", "last_pos")
 
 
 PHASES = ("APPROACH", "REACH", "CLOSE", "LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE")
@@ -45,13 +45,19 @@ class FivePointTask:
 
     def __init__(self, env, controller, geometry, seconds, gamma, seed, sampler_seed,
                  phases=PHASES, slack=1.5, margin=4.0, eval_envs=0, eval_offset=0, measured_gripper=True,
-                 reach_weight=0.0, dense_starts=False):
+                 reach_weight=0.0, dense_starts=False, task_cfg=None, noise_scale=3.0, noise_repeat=False):
         from can_pnp.starts import DenseStarts, GraspStarts, VAL_EPISODES
         from hskill.data.sgs import SuccessGuidedSampler
         from hskill.embodiment.g1_aloha import KEYPOINT_BODIES, RIGHT_EEF
         from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
 
+        from can_pnp.task_spec import TaskCfg
+
         self.env, self.ctrl, self.geometry = env, controller, geometry
+        self.task_cfg = task_cfg or TaskCfg()
+        # FM latent = noise_scale x bounded SAC action: one frame shared by the whole chunk when repeated
+        # (DSRL's pi0 parameterization), else one latent per chunk frame.
+        self.noise_scale, self.noise_repeat = noise_scale, noise_repeat
         self.n, device = env.num_envs, env.device
         self.gamma = gamma
         if "RELEASE" not in phases:
@@ -142,7 +148,7 @@ class FivePointTask:
         """Start new episodes in the worlds of ``mask`` (all when None); their observations."""
         from can_pnp.scene.layout import layout_term
         from can_pnp.starts import apply_grasp_start
-        from can_pnp.task_spec import TaskCfg, TaskTracker
+        from can_pnp.task_spec import TaskTracker
 
         device = self.env.device
         ids = (torch.arange(self.n, device=device) if mask is None else mask.nonzero().flatten())
@@ -159,7 +165,7 @@ class FivePointTask:
         self.phase[ids] = self.starts.phase_ids[rows].to(device)
         apply_grasp_start(self.env, ids, self.starts, rows)
         layout = layout_term(self.env)
-        fresh = TaskTracker(TaskCfg(), self.geometry, layout.box_center_w.clone(), layout.goal_pos_w.clone(),
+        fresh = TaskTracker(self.task_cfg, self.geometry, layout.box_center_w.clone(), layout.goal_pos_w.clone(),
                             self.env.scene.env_origins[:, 2], self.can.root_link_pos_w, self.env.step_dt)
         if self.task is None:
             self.task = fresh
@@ -196,7 +202,8 @@ class FivePointTask:
         ctrl, fm, task, n = self.ctrl, self.ctrl.fm, self.task, self.n
         cond = obs.reshape(n, fm.n_tokens, fm.n_emb)
         # Q and replay use the bounded SAC action. Only the FM receives the scaled latent.
-        noise = NOISE_SCALE * action.reshape(n, fm.horizon, fm.action_dim)
+        frames = 1 if self.noise_repeat else fm.horizon
+        noise = (self.noise_scale * action.reshape(n, frames, fm.action_dim)).expand(n, fm.horizon, fm.action_dim)
         ctrl.set_plan(ctrl.sample(cond, noise))
         before = self.potential()
         live = torch.ones(n, dtype=torch.bool, device=obs.device)
@@ -222,7 +229,7 @@ class FivePointTask:
             self.grasped |= held & accounted
             self.min_grip = torch.where(accounted, torch.minimum(self.min_grip, self.gripper_can_distance()),
                                         self.min_grip)
-            ends = live & (auto | task.placed | task.toppled)
+            ends = live & (auto | task.placed | task.toppled | task.thrown)
             terminal |= ends
             auto_any |= auto
             live &= ~(ends | (self.steps >= self.limit))
@@ -243,14 +250,13 @@ class FivePointTask:
         self.episode_return += reward
         stats = torch.stack([self.episode_return, self.steps.float() * self.env.step_dt,
                              *(x.float() for x in (task.placed, self.held_any, task.lifted, task.entered,
-                                                   task.toppled, auto_any)), self.min_grip, task.min_dist], -1)
+                                                   task.toppled, task.thrown, auto_any)), self.min_grip, task.min_dist], -1)
         self.finished = (stats, done)
         self.last_next = (next_obs, next_state)
         return dict(actor_observation=obs, observation=state, action=action, reward=reward,
                     actor_next_observation=next_obs, next_observation=next_state, terminated=done.float())
 
 
-NOISE_SCALE = 3.0  # FM latent = NOISE_SCALE * bounded SAC action
 # Reach shaping: the right gripper base sits ~8.5 cm from the can's centre when it holds the can
 # (CLOSE / LIFT starts); REACH starts are ~33 cm and APPROACH ~63 cm away.
 HELD_DISTANCE = 0.085
@@ -307,7 +313,8 @@ def save_state(args, step, rank, world, device, learner, replay, task):
         dist.barrier()
     if rank == 0:
         ckpt = dict(**learner.checkpoint(), step=step, decisions=step * world * task.n, world=world, num_envs=task.n,
-                    noise_scale=NOISE_SCALE, sampler=task.sampler.state_dict(),
+                    noise_scale=args.noise_scale, noise_repeat=args.noise_repeat, upright_release=args.upright_release,
+                    throw_speed=args.throw_speed, sampler=task.sampler.state_dict(),
                     episode_seconds=args.episode_seconds, reach_weight=args.reach_weight, dense_starts=args.dense_starts, gripper_hysteresis=args.gripper_hysteresis or None, measured_gripper=args.measured_gripper,
                     fm=str(args.fm), tracker_release=str(args.tracker_release))
         atomic_save(ckpt, args.out_dir / "flashsac.pt")
@@ -348,6 +355,7 @@ def load_state(path, args, rank, world, device, learner, replay, task):
 def train(args, device, rank, world):
     from can_pnp.scene.config import CanPnpSceneCfg, HeadCameraCfg, SceneGeometryCfg
     from can_pnp.scene.env_cfg import CanPnpEnvCfgArgs, make_env
+    from can_pnp.task_spec import TaskCfg
     from hskill.learners.critic import FEAT_DIM
     # The checkpoint catalog stores the frozen inference code beside each release.
     for source in (args.fm.parent / "inference_source", args.tracker_release / "source"):
@@ -376,12 +384,14 @@ def train(args, device, rank, world):
                              phases=tuple(args.phases), slack=args.time_slack, margin=args.time_margin,
                              eval_envs=args.eval_envs, eval_offset=rank * args.eval_envs,
                              measured_gripper=args.measured_gripper, reach_weight=args.reach_weight,
-                             dense_starts=args.dense_starts)
-        action_dim = fm.horizon * fm.action_dim
+                             dense_starts=args.dense_starts,
+                             task_cfg=TaskCfg(upright_release=args.upright_release, throw_speed=args.throw_speed),
+                             noise_scale=args.noise_scale, noise_repeat=args.noise_repeat)
+        action_dim = (1 if args.noise_repeat else fm.horizon) * fm.action_dim
         # Every rank owns a learner replica (gradients are averaged) and a replay shard.
         torch.manual_seed(args.seed)
         learner = FlashSAC(fm.n_tokens * fm.n_emb, FEAT_DIM, action_dim, device, args.gamma,
-                           noise_scale=NOISE_SCALE, target_std=args.target_std)
+                           noise_scale=args.noise_scale, target_std=args.target_std)
         torch.manual_seed(seed)
         # FM tokens are BF16 outputs (cast to FP32): storing them as BF16 is lossless.
         replay = Replay(args.capacity // world, {k: torch.bfloat16 for k in ("actor_observation", "actor_next_observation")})
@@ -417,7 +427,7 @@ def train(args, device, rank, world):
             action = torch.empty(n, action_dim, device=device)
             if learner.updates == 0:
                 # Before learning, sample the FM prior exactly (clamped to the action bound).
-                action[train_mask] = torch.randn(n_train, action_dim, device=device).clamp(-NOISE_SCALE, NOISE_SCALE) / NOISE_SCALE
+                action[train_mask] = torch.randn(n_train, action_dim, device=device).clamp(-args.noise_scale, args.noise_scale) / args.noise_scale
             else:
                 action[train_mask] = learner.act(obs[train_mask], reset)
             if eval_mask.any():
@@ -552,6 +562,15 @@ def main():
                    help="Weight of the potential-based reach shaping (gripper-to-can distance until the can "
                         "is first held; 0 disables). The can-to-goal shaping has weight 1")
     p.add_argument("--episode-seconds", type=float, default=30., help="Cap on every configuration's time budget")
+    p.add_argument("--noise-scale", type=float, default=3.0,
+                   help="FM latent bound: latent = noise-scale x tanh-bounded SAC action (DSRL's action magnitude)")
+    p.add_argument("--noise-repeat", action=argparse.BooleanOptionalAction, default=False,
+                   help="Steer one frame of FM latent repeated across the chunk (DSRL's pi0 parameterization) "
+                        "instead of an independent latent per frame")
+    p.add_argument("--upright-release", action=argparse.BooleanOptionalAction, default=False,
+                   help="Success also needs the can upright and the right gripper commanded open")
+    p.add_argument("--throw-speed", type=float, default=0.0,
+                   help="m/s; > 0: a can not held and faster than this for 0.06 s fails the episode (thrown)")
     p.add_argument("--phases", nargs="+", default=list(PHASES), choices=PHASES,
                    help="Recorded start phases in the SGS reset bank (one configuration per phase and training episode)")
     p.add_argument("--time-slack", type=float, default=1.5,
@@ -582,6 +601,8 @@ def main():
     world = int(os.environ.get("WORLD_SIZE", 1))
     if (not 0 < args.gamma <= 1 or not math.isfinite(args.episode_seconds) or args.episode_seconds <= 0
             or not (math.isfinite(args.reach_weight) and args.reach_weight >= 0)
+            or not (math.isfinite(args.noise_scale) and args.noise_scale > 1)
+            or not (math.isfinite(args.throw_speed) and args.throw_speed >= 0)
             or args.capacity < args.warmup or args.warmup < 2 * world or args.snapshot_every < 0
             or not 0 < args.target_std < 7 or args.time_slack <= 0 or args.time_margin < 0 or min(args.batch_size, args.steps, args.log_every,
                 args.save_every, args.updates_per_step, args.calibration_size - 1, args.num_envs, args.fm_batch) < 1

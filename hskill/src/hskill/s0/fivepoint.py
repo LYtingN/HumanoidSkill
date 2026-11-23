@@ -43,7 +43,10 @@ class FivePointPlanner(DiffusionObservations):
                 with torch.autocast(device_type=images.device.type, dtype=torch.bfloat16):
                     cond = self.fm.encode(images, states).float()
                 mean, _ = self.noise_actor.get_mean_and_std(cond.flatten(1), training=False)
-                noise = self.noise_scale * mean.tanh().reshape(1, self.fm.horizon, self.fm.action_dim)
+                # A repeated-noise actor outputs one frame of latent, shared by every frame of the chunk.
+                frames = 1 if self.noise_repeat else self.fm.horizon
+                noise = (self.noise_scale * mean.tanh().reshape(1, frames, self.fm.action_dim)).expand(
+                    1, self.fm.horizon, self.fm.action_dim)
                 with torch.autocast(device_type=images.device.type, dtype=torch.bfloat16):
                     prediction = self.fm.sample(cond, noise=noise)
             self.set_prediction(prediction)
@@ -57,14 +60,16 @@ class FivePointPlanner(DiffusionObservations):
         if weights.get("algorithm") != "flashsac":
             raise ValueError("Expected a five-point FlashSAC checkpoint")
         cfg = weights["config"]
+        repeat = bool(weights.get("noise_repeat", False))
         if (cfg["obs_dim"], cfg["action_dim"]) != (self.fm.n_tokens * self.fm.n_emb,
-                                                   self.fm.horizon * self.fm.action_dim):
+                                                   (1 if repeat else self.fm.horizon) * self.fm.action_dim):
             raise ValueError("FlashSAC checkpoint and FM dimensions differ")
         actor = FlashSACActor(cfg["blocks"], cfg["obs_dim"], cfg["actor_width"], cfg["action_dim"],
                               cfg.get("prior_std"))
         actor.load_state_dict(weights["actor"])
         self.noise_actor = actor.to(device).eval().requires_grad_(False)
         self.noise_scale = weights["noise_scale"]
+        self.noise_repeat = repeat
         hysteresis = weights.get("gripper_hysteresis")
         self.gripper_hysteresis = tuple(hysteresis) if hysteresis else None
         return weights.get("episode_seconds", 30.)

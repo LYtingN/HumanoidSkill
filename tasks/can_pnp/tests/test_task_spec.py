@@ -92,3 +92,25 @@ def test_can_resting_in_the_box_in_the_hand_is_not_done():
             task.step(in_box[:2], upright[:2], released, live[:2], held)
         done += task.placed.tolist()
     assert done == [False, True, False, True]
+
+
+def test_thrown_can_fails_unless_held_or_slow():
+    geo, cfg = SceneGeometryCfg(), TaskCfg(throw_speed=0.5)
+    goal = torch.tensor([[0.5, 0.0, 0.85]]).repeat(3, 1)
+    pos = torch.tensor([[0.2, 0.0, 1.0]]).repeat(3, 1)
+    upright = torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1)
+    task = TaskTracker(cfg, geo, goal, goal, torch.zeros(3), pos, step_dt=0.02)
+    live = torch.ones(3, dtype=torch.bool)
+    held = torch.tensor([False, True, False])
+    step = torch.tensor([[0.04], [0.04], [0.004]]) * torch.tensor([[0.0, 1.0, 0.0]])  # 2, 2, 0.2 m/s
+    for _ in range(task.throw_steps):
+        pos = pos + step
+        task.step(pos, upright, torch.zeros(3, dtype=torch.bool), live, held)
+    assert task.thrown.tolist() == [True, False, False]
+    assert task.potential(torch.zeros(3, dtype=torch.bool))[0] == 0.0
+    # Off by default: the same flight is not a failure.
+    off = TaskTracker(TaskCfg(), geo, goal, goal, torch.zeros(3), pos, step_dt=0.02)
+    for _ in range(5):
+        pos = pos + step
+        off.step(pos, upright, torch.zeros(3, dtype=torch.bool), live, held)
+    assert not off.thrown.any()

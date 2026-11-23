@@ -12,6 +12,10 @@ Toppled: outside the box, the can not held and its axis tilted past ``acos(toppl
 ``success_hold_s``. The shaping alone would still reward a can knocked over towards the box (its
 centre moves by up to half its height), so a toppled can fails the episode like a dropped one.
 
+Thrown (``throw_speed`` > 0): the can not held and faster than ``throw_speed`` for ``throw_hold_s``, e.g.
+flung into the box or knocked away. It fails the episode like a toppled can, so a policy cannot win by
+throwing; a can released resting on the box bottom, or dropped a few centimetres, stays below it.
+
 Reward: a terminal reward and a potential-based shaping, kept apart,
 
     r_k    = R_term(s_{k+1}) + gamma * phi(s_{k+1}) - phi(s_k)
@@ -52,6 +56,8 @@ class TaskCfg:
     topple_cos: float = 0.5  # a can not held with its axis tilted past 60 degrees has toppled
     rest_speed: float = 0.05  # m/s: a can slower than this rests
     upright_release: bool = False  # done also needs the can upright and the gripper open (stricter)
+    throw_speed: float = 0.0  # m/s; > 0: a can not held, faster than this for throw_hold_s, fails (thrown)
+    throw_hold_s: float = 0.06
 
 
 def shaping_potential(dist: torch.Tensor, cfg: TaskCfg) -> torch.Tensor:
@@ -74,6 +80,10 @@ class TaskTracker:
                                                                 for _ in range(4))  # fmt: skip
         self.hold = torch.zeros(n, dtype=torch.long, device=device)
         self.tilted = torch.zeros(n, dtype=torch.long, device=device)
+        # Thrown: the can flies or slides fast while nobody holds it (flung into the box, knocked away).
+        self.thrown = torch.zeros(n, dtype=torch.bool, device=device)
+        self.flung = torch.zeros(n, dtype=torch.long, device=device)
+        self.throw_steps = max(1, round(cfg.throw_hold_s / step_dt))
         self.final_dist = (can_pos - goal).norm(dim=-1)
         self.min_dist = self.final_dist.clone()
         self.last_pos, self.dt = can_pos.clone(), step_dt
@@ -88,7 +98,12 @@ class TaskTracker:
         # Can axis z component of (w, x, y, z): 1 - 2(x^2 + y^2).
         axis_z = 1 - 2 * (can_quat[:, 1].square() + can_quat[:, 2].square())
         upright = axis_z > self.cfg.upright_cos
-        rest = (can_pos - self.last_pos).norm(dim=-1) < self.cfg.rest_speed * self.dt
+        speed = (can_pos - self.last_pos).norm(dim=-1) / self.dt
+        rest = speed < self.cfg.rest_speed
+        if self.cfg.throw_speed > 0:
+            fast = live & (speed > self.cfg.throw_speed) & (True if held is None else ~held)
+            self.flung = torch.where(fast, self.flung + 1, 0)
+            self.thrown |= self.flung >= self.throw_steps
         self.last_pos = torch.where(live[:, None], can_pos, self.last_pos)
         loose = live & ~in_box & (axis_z < self.cfg.topple_cos) & (True if held is None else ~held)
         self.tilted = torch.where(loose, self.tilted + 1, 0)
@@ -115,5 +130,5 @@ class TaskTracker:
         """The undiscounted rewards so far plus phi of the start: R_term of an ended episode (done or
         failed: fall / drop / divergence, or the can toppled; phi = 0 there), else phi of the can's
         latest position."""
-        live = torch.where(failed | self.toppled, 0.0, self.shaping())
+        live = torch.where(failed | self.toppled | self.thrown, 0.0, self.shaping())
         return torch.where(self.placed, self.terminal_reward(), live).float()
