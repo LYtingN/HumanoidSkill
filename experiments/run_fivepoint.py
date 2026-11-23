@@ -123,6 +123,8 @@ def main():
     backend.add_argument("--official-human-five", dest="tracker", action="store_const", const=None,
                          help="Use the official v0.1 human/five ONNX tracker (default)")
     backend.add_argument("--tracker", type=Path, help="Use a G1 keypoint tracker checkpoint")
+    backend.add_argument("--g1-five-export", type=Path,
+                         help="Use a single-G1 v0.1 human/five export (policy.onnx and g1.json)")
     parser.add_argument("--sample-future", action=argparse.BooleanOptionalAction, default=None,
                         help="Hold ten evenly spaced future frames until the next FM replan "
                              "(human/five default); --no-sample-future uses a sliding window")
@@ -140,7 +142,7 @@ def main():
     parser.add_argument("--back-off", type=float, default=0., metavar="M",
                         help="Move the recorded start robot this far backwards along its heading (m)")
     args = parser.parse_args()
-    if args.flashsac and (args.tracker or args.sample_future is False):
+    if args.flashsac and (args.tracker or args.g1_five_export or args.sample_future is False):
         parser.error("--flashsac requires the official v0.1 tracker with sampled future frames")
     if args.sample_future is not None and args.tracker is not None:
         parser.error("Future-frame sampling options apply only to the official human/five tracker")
@@ -163,8 +165,9 @@ def main():
         print(f"Target can mass (compiled model): {can_mass:.6f} kg", flush=True)
         if args.tracker is None:
             from hskill.s0.official_five import OfficialFiveController
-            controller = OfficialFiveController(env, args.fm, sample_future=args.sample_future is not False)
-            tracker_label = "v0.1 human/five"
+            controller = OfficialFiveController(env, args.fm, sample_future=args.sample_future is not False,
+                                                g1_export=args.g1_five_export)
+            tracker_label = str(args.g1_five_export) if args.g1_five_export else "v0.1 human/five"
         else:
             controller = FivePointController(env, args.fm, args.tracker)
             tracker_label = args.tracker.stem

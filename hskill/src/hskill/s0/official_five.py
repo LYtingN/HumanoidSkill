@@ -65,16 +65,18 @@ class HumanFiveReference:
 
 
 class OfficialFiveController(FivePointPlanner):
-    def __init__(self, env, fm_path, *, sample_future=True, release=Path("downloads/morphmimic-v0.1")):
+    def __init__(self, env, fm_path, *, sample_future=True, release=Path("downloads/morphmimic-v0.1"),
+                 g1_export=None):
         super().__init__(env, fm_path)
-        export = release / "morphmimic_policy"
-        robot = json.loads((export / "g1_amber.json").read_text())["robot"]
+        export = release / "morphmimic_policy" if g1_export is None else g1_export
+        robot_name = "g1_amber" if g1_export is None else "g1"
+        robot = json.loads((export / f"{robot_name}.json").read_text())["robot"]
         self.reference = HumanFiveReference(release / "source/deploy/vr_teleop/gmr_configs/stand.json",
                                             robot["tracked_bodies"], self.fm.execute_steps,
                                             future_horizon=self.fm.horizon if sample_future else None)
         if sample_future:
             print(f"Tracker future frames (zero-based): {self.reference.future_indices.tolist()}", flush=True)
-        self.runner = PolicyRunner(export, "g1_amber", self.reference, interface="human", human_points="five")
+        self.runner = PolicyRunner(export, robot_name, self.reference, interface="human", human_points="five")
         self.action_term = env.action_manager.get_term("joint_pos")
         if (self.runner.robot.native_joint_names != C.BODY_JOINT_NAMES or
                 tuple(self.action_term.target_names) != C.BODY_JOINT_NAMES):
@@ -82,7 +84,7 @@ class OfficialFiveController(FivePointPlanner):
         if not np.isclose(env.step_dt, self.runner.robot.control_dt):
             raise ValueError("Scene and ONNX policy control rates differ")
         self.step = 0
-        print(f"Loaded {fm_path.name} and official v0.1 action_human (g1_amber, five slots)", flush=True)
+        print(f"Loaded {fm_path} and {export}/policy.onnx ({robot_name}, human/five)", flush=True)
 
     def body_action(self, reset, window):
         if reset:
