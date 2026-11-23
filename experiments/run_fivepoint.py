@@ -6,6 +6,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import imageio_ffmpeg
+import mujoco
 import numpy as np
 import torch
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
@@ -53,6 +54,30 @@ class FivePointTrajectories:
             print(f"Native five-point overlay drawn ({len(remaining)} predicted frames)", flush=True)
 
 
+class _SceneDrawer:
+    """The native visualizer's add_sphere/add_cylinder, drawn into an offscreen mjvScene."""
+
+    def __init__(self, scene):
+        self.scene = scene
+
+    def _geom(self):
+        if self.scene.ngeom >= self.scene.maxgeom:
+            return None
+        self.scene.ngeom += 1
+        return self.scene.geoms[self.scene.ngeom - 1]
+
+    def add_sphere(self, center, radius, color):
+        if (g := self._geom()) is not None:
+            mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_SPHERE, np.array([radius, 0, 0]), np.asarray(center, float),
+                                np.eye(3).flatten(), np.asarray(color, np.float32))
+
+    def add_cylinder(self, a, b, radius, color):
+        if (g := self._geom()) is not None:
+            mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_CAPSULE, np.zeros(3), np.zeros(3), np.eye(3).flatten(),
+                                np.asarray(color, np.float32))
+            mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, radius, np.asarray(a, float), np.asarray(b, float))
+
+
 def run_native(env, controller, start_episode, limit):
     wrapped = RslRlVecEnvWrapper(env)
     env.manager_visualizers["five_point_trajectories"] = FivePointTrajectories(controller)
@@ -62,6 +87,11 @@ def run_native(env, controller, start_episode, limit):
         nonlocal step
         new_episode = env.episode_length_buf[0].item() == 0
         if new_episode:
+            if step:
+                terms = [name for name in env.termination_manager.active_terms
+                         if env.termination_manager.get_term(name).item()]
+                print(f"Episode ended at t={step * env.step_dt:.2f}s, terminations={terms or 'none (manual reset?)'}",
+                      flush=True)
             start_episode()
             step = 0
         if step in (0, 50, 150, 750):
@@ -107,6 +137,8 @@ def main():
     parser.add_argument("--gripper-hysteresis", type=float, nargs="*", default=[0.02, 0.05], metavar="M",
                         help="Right gripper closes below the first FM width, reopens above the second (m), as in "
                              "training; no values: raw FM widths. A --flashsac checkpoint's own setting wins")
+    parser.add_argument("--back-off", type=float, default=0., metavar="M",
+                        help="Move the recorded start robot this far backwards along its heading (m)")
     args = parser.parse_args()
     if args.flashsac and (args.tracker or args.sample_future is False):
         parser.error("--flashsac requires the official v0.1 tracker with sampled future frames")
@@ -146,6 +178,12 @@ def main():
         if starts is not None:
             episode_row = torch.tensor([starts.episode_ids.index(args.episode)])
             print(f"Recorded start: episode={args.episode} phase={phase} frame={starts.frame[episode_row].item()}", flush=True)
+            if args.back_off:
+                w, x, y, z = starts.root_quat[episode_row[0]].tolist()
+                yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+                starts.root_pos[episode_row[0], 0] -= args.back_off * math.cos(yaw)
+                starts.root_pos[episode_row[0], 1] -= args.back_off * math.sin(yaw)
+                print(f"Start moved {args.back_off:.2f} m back (heading {math.degrees(yaw):.0f} deg)", flush=True)
 
         def start_episode():
             if starts is not None:
@@ -158,6 +196,7 @@ def main():
 
         args.record.parent.mkdir(parents=True, exist_ok=True)
         overview = _Overview(env, 0)
+        trajectories = FivePointTrajectories(controller)  # the five-point plan overlay, as in the native viewer
         stack.callback(overview.renderer.close)
         writer = imageio_ffmpeg.write_frames(str(args.record), (960, 480), fps=round(1 / env.step_dt),
                                              codec="libx264", output_params=["-movflags", "+faststart"])
@@ -183,7 +222,7 @@ def main():
                           and geometry.box_bottom_z <= xyz[2] <= geometry.box_bottom_z + geometry.can_height)
             head = env.scene["head_camera"].data.rgb.cpu().numpy()
             panel = np.zeros((480, 960, 3), dtype=np.uint8)
-            panel[:, :640] = overview.frame()
+            panel[:, :640] = overview.frame(lambda scene: trajectories.debug_vis(_SceneDrawer(scene)))
             panel[120:360, 640:] = head[0]
             writer.send(panel)
         report = dict(tracker=tracker_label, episode=args.episode if starts is not None else None, phase=phase, seed=args.seed, steps=step + 1,
