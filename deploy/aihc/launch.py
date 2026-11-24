@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 MODULES = {
+    "dynamic-fm": ("Humanoid-Diffusion", "train"),
     "supermimic": ("supermimic-reproduced", "supermimic.scripts.train"),
     "can-pnp-dsrl": (".", "experiments.train_dsrl"),
     "can-pnp-v3": (".", "experiments.train_v3"),
@@ -15,6 +16,14 @@ MODULES = {
 
 
 def training_args(profile, settings, output):
+    if profile == "dynamic-fm":
+        comparison = (["--compare-pretraining", settings["comparison_checkpoint"]]
+                      if settings.get("comparison_checkpoint") else [])
+        return ["--config", "../Dynamic-FM/can_pnp.yaml", "--output", str(output),
+                "--set", "dataset.path=" + settings["dataset"],
+                "--set", "model.vision_checkpoint=" + settings["vision_checkpoint"],
+                "--set", "dataset.cache_dir=" + str(output.parent / "image_cache"),
+                *comparison, *settings.get("args", [])]
     if profile == "supermimic":
         data = (["--data.library", settings["library"]] if settings.get("library")
                 else ["--data.npz-dir", settings["npz_dir"]])
@@ -57,6 +66,8 @@ def main():
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, range(count)))
     profile = manifest["profile"]
+    if profile == "dynamic-fm":
+        os.environ["PYTHONPATH"] = str(root / "Dynamic-FM") + os.pathsep + os.environ["PYTHONPATH"]
     directory, module = MODULES[profile]
     output = run / "outputs"
     output.mkdir(exist_ok=True)

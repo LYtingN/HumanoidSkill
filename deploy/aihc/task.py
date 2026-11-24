@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 REMOTE_ROOT = "/root/workspace/HumanoidSkill"
-PROFILES = ("supermimic", "can-pnp-dsrl", "can-pnp-v3", "fivepoint-flashsac", "morphmimic-five")
+PROFILES = ("supermimic", "can-pnp-dsrl", "can-pnp-v3", "fivepoint-flashsac", "morphmimic-five", "dynamic-fm")
 
 
 def read_json(path):
@@ -44,6 +44,11 @@ def aihc(site, args):
 
 
 def input_paths(profile, settings):
+    if profile == "dynamic-fm":
+        paths = [("dataset", "dir"), ("vision_checkpoint", "file")]
+        if settings.get("comparison_checkpoint"):
+            paths.append(("comparison_checkpoint", "file"))
+        return paths
     if profile == "morphmimic-five":
         return [("checkout", "dir"), ("subset_yaml", "file"), ("human_root", "dir")]
     if profile == "supermimic":
@@ -213,9 +218,21 @@ def prepare(site, profile, settings):
     if profile == "morphmimic-five":
         # The pinned training checkout is already on CFS. The container reads these two scripts.
         files = [b"deploy/aihc/cache.sh", b"experiments/launch/train_morphmimic_five.sh"]
+    elif profile == "dynamic-fm":
+        files = [b"deploy/aihc/cache.sh", b"deploy/aihc/launch.py"]
     else:
         files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).split(b"\0")
     with tarfile.open(destination / "source.tar.gz", "w:gz") as archive:
+        if profile == "dynamic-fm":
+            umi = ROOT.parent / "UMI-Diffusion"
+            native = umi / "Humanoid-Diffusion"
+            sources = [native / "train.py", *sorted((native / "humanoid_diffusion").glob("*.py")),
+                       umi / "Dynamic-FM/dynamic_fm.py", umi / "Dynamic-FM/can_pnp.yaml",
+                       umi / "Dynamic-FM/keypoint_reference.py"]
+            if settings.get("comparison_checkpoint"):
+                sources.append(umi / "Dynamic-FM/compare_pretraining.py")
+            for source in sources:
+                archive.add(source, arcname=str(source.relative_to(umi)), recursive=False)
         for raw in sorted(set(files)):
             if not raw:
                 continue

@@ -45,9 +45,9 @@ class FivePointTrajectories:
                 if np.linalg.norm(b - a) > 1e-5:
                     visualizer.add_cylinder(a, b, .009, color)
             visualizer.add_sphere(path[-1], .022, color)
-        future_indices = getattr(getattr(self.controller, "reference", None), "future_indices", None)
-        if future_indices is not None:
-            for frame in self.points[future_indices]:
+        reference = getattr(self.controller, "reference", None)
+        if hasattr(reference, "window_indices"):  # the frames the tracker reads at this step
+            for frame in self.points[reference.window_indices(start)]:
                 for point in frame:
                     visualizer.add_sphere(point, .014, (1., 1., 1., 1.))
         if first_draw:
@@ -125,9 +125,11 @@ def main():
     backend.add_argument("--tracker", type=Path, help="Use a G1 keypoint tracker checkpoint")
     backend.add_argument("--g1-five-export", type=Path,
                          help="Use a single-G1 v0.1 human/five export (policy.onnx and g1.json)")
-    parser.add_argument("--sample-future", action=argparse.BooleanOptionalAction, default=None,
-                        help="Hold ten evenly spaced future frames until the next FM replan "
-                             "(human/five default); --no-sample-future uses a sliding window")
+    backend.add_argument("--pico5", action="store_true", help="Use the packaged Pico Student 2.5 five-point actor")
+    parser.add_argument("--tracker-window", choices=("official", "spread"), default=None,
+                        help="Plan frames the human/five tracker reads: official = frames k+1..k+10 at execution "
+                             "step k (default); spread = the legacy held frames. Default with --flashsac: the "
+                             "checkpoint's own (spread for checkpoints that predate the option)")
     parser.add_argument("--episode", type=int, default=3)
     parser.add_argument("--phase", choices=["WALK", "APPROACH", "REACH", "CLOSE", "LIFT", "TURN_WALK", "PLACE_REACH", "LOWER", "RELEASE"],
                         help="WALK uses the scene layout; APPROACH uses the recorded episode start")
@@ -142,31 +144,40 @@ def main():
     parser.add_argument("--back-off", type=float, default=0., metavar="M",
                         help="Move the recorded start robot this far backwards along its heading (m)")
     args = parser.parse_args()
-    if args.flashsac and (args.tracker or args.g1_five_export or args.sample_future is False):
-        parser.error("--flashsac requires the official v0.1 tracker with sampled future frames")
-    if args.sample_future is not None and args.tracker is not None:
-        parser.error("Future-frame sampling options apply only to the official human/five tracker")
+    if args.flashsac and (args.pico5 or args.tracker or args.g1_five_export):
+        parser.error("--flashsac requires the official v0.1 human/five tracker")
+    if args.tracker_window is not None and (args.pico5 or args.tracker is not None):
+        parser.error("--tracker-window applies only to the official human/five tracker")
     if args.gripper_hysteresis and not (len(args.gripper_hysteresis) == 2
                                         and 0 <= args.gripper_hysteresis[0] <= args.gripper_hysteresis[1] <= 0.065):
         parser.error("--gripper-hysteresis takes CLOSE REOPEN widths in [0, 0.065] m")
     if args.seconds is not None and (not math.isfinite(args.seconds) or args.seconds <= 0):
         parser.error("--seconds must be positive")
-    phase = args.phase or ("APPROACH" if args.flashsac else "CLOSE" if args.record else "WALK")
+    phase = args.phase or ("APPROACH" if args.flashsac or args.pico5 else "CLOSE" if args.record else "WALK")
     seconds = args.seconds
     torch.manual_seed(args.seed)
     geometry = SceneGeometryCfg(can_mass=.1)
     scene = CanPnpSceneCfg(geometry=geometry, camera=HeadCameraCfg(width=320, height=240))
-    env = make_env(CanPnpEnvCfgArgs(num_envs=1, randomize=False, seed=args.seed,
-                                    enable_time_out=False, scene=scene), device="cuda:0")
+    env_args = CanPnpEnvCfgArgs(num_envs=1, randomize=False, seed=args.seed, enable_time_out=False, scene=scene)
+    if args.pico5:
+        from experiments.pico5_can_pnp import PicoController, make_pico_env
+        env = make_pico_env(env_args, "cuda:0")
+    else:
+        env = make_env(env_args, device="cuda:0")
     with ExitStack() as stack:
         stack.callback(env.close)
         can_bodies = env.scene["can"].indexing.body_ids.cpu().numpy()
         can_mass = env.sim.mj_model.body_mass[can_bodies].sum()
         print(f"Target can mass (compiled model): {can_mass:.6f} kg", flush=True)
-        if args.tracker is None:
+        if args.pico5:
+            controller = PicoController(env, args.fm)
+            tracker_label = "Pico Student 2.5"
+        elif args.tracker is None:
             from hskill.s0.official_five import OfficialFiveController
-            controller = OfficialFiveController(env, args.fm, sample_future=args.sample_future is not False,
-                                                g1_export=args.g1_five_export)
+            window = args.tracker_window or "official"
+            if args.flashsac and args.tracker_window is None:
+                window = torch.load(args.flashsac, map_location="cpu", weights_only=True).get("tracker_window", "spread")
+            controller = OfficialFiveController(env, args.fm, tracker_window=window, g1_export=args.g1_five_export)
             tracker_label = str(args.g1_five_export) if args.g1_five_export else "v0.1 human/five"
         else:
             controller = FivePointController(env, args.fm, args.tracker)
@@ -198,7 +209,11 @@ def main():
             return
 
         args.record.parent.mkdir(parents=True, exist_ok=True)
-        overview = _Overview(env, 0)
+        if args.pico5:
+            cam = env.cfg.viewer
+            overview = _Overview(env, 0, camera=(cam.azimuth, cam.elevation, cam.distance))
+        else:
+            overview = _Overview(env, 0)
         trajectories = FivePointTrajectories(controller)  # the five-point plan overlay, as in the native viewer
         stack.callback(overview.renderer.close)
         writer = imageio_ffmpeg.write_frames(str(args.record), (960, 480), fps=round(1 / env.step_dt),
@@ -211,6 +226,7 @@ def main():
         max_height = start_height
         replans = controller.replans
         inside = False
+        simultaneous_contact_steps = 0
         for step in range(limit):
             action = controller.act(reset=step == 0)
             _, _, terminated, truncated, _ = env.step(action)
@@ -220,6 +236,10 @@ def main():
                 break
             xyz = env.scene["can"].data.root_link_pos_w[0]
             max_height = max(max_height, xyz[2].item())
+            if args.pico5:
+                simultaneous_contact_steps += int(all(
+                    env.scene[f"finger_{side}_can_contacts"].data.found.any().item() for side in ("l", "r")
+                ))
             half_box = xyz.new_tensor(geometry.upper_box_size[:2]) / 2 - geometry.box_wall_thickness
             inside = bool(((xyz[:2] - layout_term(env).box_center_w[0, :2]).abs() < half_box).all()
                           and geometry.box_bottom_z <= xyz[2] <= geometry.box_bottom_z + geometry.can_height)
@@ -234,6 +254,9 @@ def main():
         if done:
             report["termination_terms"] = [name for name in env.termination_manager.active_terms
                                            if env.termination_manager.get_term(name).item()]
+        if args.pico5:
+            report["steps_with_both_right_fingers_on_can"] = simultaneous_contact_steps
+            args.record.with_suffix(".json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report), flush=True)
 
 

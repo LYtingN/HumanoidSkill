@@ -316,7 +316,7 @@ def save_state(args, step, rank, world, device, learner, replay, task):
                     noise_scale=args.noise_scale, noise_repeat=args.noise_repeat, upright_release=args.upright_release,
                     throw_speed=args.throw_speed, sampler=task.sampler.state_dict(),
                     episode_seconds=args.episode_seconds, reach_weight=args.reach_weight, dense_starts=args.dense_starts, gripper_hysteresis=args.gripper_hysteresis or None, measured_gripper=args.measured_gripper,
-                    fm=str(args.fm), tracker_release=str(args.tracker_release))
+                    fm=str(args.fm), tracker_release=str(args.tracker_release), tracker_window=args.tracker_window)
         atomic_save(ckpt, args.out_dir / "flashsac.pt")
         if args.snapshot_every and step % args.snapshot_every == 0:
             atomic_save(ckpt, args.out_dir / f"flashsac-{step:08d}.pt")
@@ -324,6 +324,11 @@ def save_state(args, step, rank, world, device, learner, replay, task):
 
 def load_state(path, args, rank, world, device, learner, replay, task):
     ckpt = torch.load(path, map_location=device, weights_only=True)
+    # Checkpoints without the key predate the option and used the spread window.
+    trained = ckpt.get("tracker_window", "spread")
+    if trained != args.tracker_window:
+        raise ValueError(f"{path} was trained with the {trained} tracker window; resume it with "
+                         f"--tracker-window {trained} or start a new run")
     learner.load_checkpoint(ckpt)
     task.sampler.load_state_dict(ckpt["sampler"])
     step = ckpt["step"]
@@ -378,7 +383,8 @@ def train(args, device, rank, world):
             env.sim.wp_model.opt.warn_overflow = int(env.sim.wp_model.opt.warn_overflow) & ~int(OverflowType.LS_ITERATIONS)
             env.sim.create_graph()
         ctrl = BatchedOfficialFive(env, args.fm, release=args.tracker_release, fm_batch=args.fm_batch,
-                                   gripper_hysteresis=tuple(args.gripper_hysteresis) if args.gripper_hysteresis else None)
+                                   gripper_hysteresis=tuple(args.gripper_hysteresis) if args.gripper_hysteresis else None,
+                                   tracker_window=args.tracker_window)
         fm = ctrl.fm.eval().requires_grad_(False)
         task = FivePointTask(env, ctrl, geometry, args.episode_seconds, args.gamma, seed, args.seed,
                              phases=tuple(args.phases), slack=args.time_slack, margin=args.time_margin,
@@ -539,6 +545,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--fm", type=Path, default=Path("downloads/5points_FM/fivepoints_fm.pt"))
     p.add_argument("--tracker-release", type=Path, default=Path("downloads/morphmimic-v0.1"))
+    p.add_argument("--tracker-window", choices=("official", "spread"), default="official",
+                   help="Plan frames the tracker reads: official = frames k+1..k+10 at execution step k, as the "
+                        "release does; spread = the legacy ten frames over 8..31 held per plan")
     p.add_argument("--out-dir", type=Path, default=Path("logs/fivepoint_flashsac"))
     p.add_argument("--num-envs", type=int, default=32, help="Lockstep worlds per GPU")
     p.add_argument("--fm-batch", type=int, default=256, help="Worlds per FM forward pass (bounds GPU memory)")

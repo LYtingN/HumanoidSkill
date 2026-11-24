@@ -17,7 +17,8 @@ def unit(x):
     return x / np.linalg.norm(x, axis=-1, keepdims=True)
 
 
-def test_batched_tracker_matches_policy_runner():
+@pytest.mark.parametrize("window", ["official", "spread"])
+def test_batched_tracker_matches_policy_runner(window):
     sys.path[:0] = [str(FM_SOURCE), str(RELEASE / "source")]
     pytest.importorskip("onnxruntime")
     from deploy.sim2sim.policy_node import PolicyRunner
@@ -29,8 +30,9 @@ def test_batched_tracker_matches_policy_runner():
     export = RELEASE / "morphmimic_policy"
     tracked = json.loads((export / "g1_amber.json").read_text())["robot"]["tracked_bodies"]
     stand = RELEASE / "source/deploy/vr_teleop/gmr_configs/stand.json"
-    batched = BatchedHumanFive(RELEASE, n, execute, horizon)
-    runners = [PolicyRunner(export, "g1_amber", HumanFiveReference(stand, tracked, execute, future_horizon=horizon),
+    batched = BatchedHumanFive(RELEASE, n, execute, horizon, window=window)
+    runners = [PolicyRunner(export, "g1_amber",
+                            HumanFiveReference(stand, tracked, execute, horizon=horizon, window=window),
                             interface="human", human_points="five") for _ in range(n)]
     robot = batched.robot
     steps = [0] * n
@@ -59,7 +61,8 @@ def test_batched_tracker_matches_policy_runner():
     assert worst < 1e-4, worst
 
 
-def test_torch_graph_matches_onnxruntime():
+@pytest.mark.parametrize("window", ["official", "spread"])
+def test_torch_graph_matches_onnxruntime(window):
     sys.path[:0] = [str(FM_SOURCE), str(RELEASE / "source")]
     pytest.importorskip("onnxruntime")
     import torch
@@ -67,8 +70,8 @@ def test_torch_graph_matches_onnxruntime():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     n, rng = 16, np.random.default_rng(1)
-    reference = BatchedHumanFive(RELEASE, n, 8, 32)
-    graph = BatchedHumanFive(RELEASE, n, 8, 32, device=device)
+    reference = BatchedHumanFive(RELEASE, n, 8, 32, window=window)
+    graph = BatchedHumanFive(RELEASE, n, 8, 32, device=device, window=window)
     if graph.graph is None:  # a CPU device keeps onnxruntime; force the PyTorch graph on the CPU
         from deploy.sim2sim.policy_node import pruned
         import onnx
@@ -93,3 +96,49 @@ def test_torch_graph_matches_onnxruntime():
         worst = max(worst, np.abs(graph.step(imu, gyro, q, dq) - reference.step(imu, gyro, q, dq)).max())
     print(f"max |PyTorch graph ({device}) - onnxruntime| target difference {worst:.2e} rad")
     assert worst < 1e-4, worst
+
+
+def test_official_window_reads_the_next_ten_plan_frames():
+    """At execution step k the official window is plan frames k+1 .. k+10, as the release's ClipReference."""
+    sys.path[:0] = [str(FM_SOURCE), str(RELEASE / "source")]
+    pytest.importorskip("onnxruntime")
+    from hskill.s0.official_five_batch import BatchedHumanFive
+
+    n, execute, horizon = 2, 8, 32
+    rng = np.random.default_rng(2)
+    batched = BatchedHumanFive(RELEASE, n, execute, horizon)
+    robot = batched.robot
+    pos = rng.normal(size=(n, horizon, 5, 3)) * 0.2 + np.array([0.0, 0.0, 0.8])
+    quat = unit(rng.normal(size=(n, horizon, 5, 4)))
+    batched.set_plan(pos, quat)
+    for k in range(execute):
+        imu = np.tile([1.0, 0.0, 0.0, 0.0], (n, 1))
+        q = np.tile(robot.default_joint_pos, (n, 1))
+        batched.step(imu, np.zeros((n, 3)), q, np.zeros_like(q))
+        np.testing.assert_array_equal(batched.windows, batched.plan_frames[:, k + 1:k + 11])
+
+
+def test_device_goal_features_match_numpy():
+    """The on-device goal and heading features equal the release's NumPy ones at every execution step."""
+    sys.path[:0] = [str(FM_SOURCE), str(RELEASE / "source")]
+    import torch
+    from hskill.s0.official_five import HumanFiveReference
+    from hskill.s0.official_five_batch import (heading_features_batch, heading_features_torch, human_features_batch,
+                                               human_features_torch)
+    from deploy.sim2sim.human import HUMAN_SPINE3, _anchor, point_mask
+
+    rng = np.random.default_rng(3)
+    n, h = 5, 32
+    tracked = json.loads((RELEASE / "morphmimic_policy/g1_amber.json").read_text())["robot"]["tracked_bodies"]
+    ref = HumanFiveReference(RELEASE / "source/deploy/vr_teleop/gmr_configs/stand.json", tracked, 8, horizon=h)
+    ref.update((rng.normal(size=(n * h, 5, 3)) * 0.2 + np.array([0.0, 0.0, 0.8])), unit(rng.normal(size=(n * h, 5, 4))))
+    frames = ref.frames.reshape(n, h, -1)
+    mask = point_mask("five")
+    torso = unit(rng.normal(size=(n, 4)))
+    slot = HUMAN_SPINE3 if mask[HUMAN_SPINE3] else _anchor(mask)
+    for k in range(8):
+        win = frames[:, ref.window_indices(k)]
+        t = torch.as_tensor(win, dtype=torch.float64)
+        np.testing.assert_allclose(human_features_torch(t, mask).numpy(), human_features_batch(win, mask), atol=1e-9)
+        got = heading_features_torch(torch.as_tensor(torso), t.unflatten(-1, (24, 7))[..., slot, 3:]).numpy()
+        np.testing.assert_allclose(got, heading_features_batch(torso, win, mask), atol=1e-9)

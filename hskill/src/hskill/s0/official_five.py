@@ -15,10 +15,22 @@ from hskill.embodiment import g1_aloha as C
 from hskill.s0.fivepoint import FivePointPlanner
 
 
+# Which plan frames the tracker sees at execution step k of a plan (frame 0: the planning step).
+# "official": frames k+1 .. k+10, re-read every control step, as the release's PolicyRunner reads a
+#   clip (ClipReference, REFERENCE_LEAD = 1): the human encoder was trained on 10 consecutive frames.
+# "spread": ten frames evenly spaced over execute_steps .. horizon-1, held for the whole plan. The
+#   encoder reads them as 10 consecutive frames, i.e. a ~2.6x faster motion seen ~0.3 s ahead; kept only
+#   to reproduce checkpoints trained with it (FlashSAC runs before 2026-11-24).
+TRACKER_WINDOWS = ("official", "spread")
+REFERENCE_LEAD = 1
+
+
 class HumanFiveReference:
     """Use corresponding robot/human poses in the release's paired standing frame."""
 
-    def __init__(self, stand_file, tracked_bodies, execute_steps, *, future_horizon=None):
+    def __init__(self, stand_file, tracked_bodies, execute_steps, *, horizon, window="official"):
+        if window not in TRACKER_WINDOWS:
+            raise ValueError(f"Tracker window must be one of {TRACKER_WINDOWS}, got {window!r}")
         stand = json.loads(stand_file.read_text())["g1"]["state"]
         indices = [tracked_bodies.index(name) for name in KP_BODY_NAMES]
         self.robot_pos = np.asarray(stand[58:100]).reshape(14, 3)[indices]
@@ -33,13 +45,18 @@ class HumanFiveReference:
                           np.linalg.norm(self.robot_rel[1:], axis=1))
         self.height_ratio = human_pos[0, 2] / self.robot_pos[0, 2]
         self.axes = quat_mul(quat_inv(self.robot_quat), self.stand[self.slots, 3:])
-        self.execute_steps = execute_steps
-        self.future_indices = None
-        if future_horizon is not None:
-            if future_horizon - execute_steps < GOAL_K:
-                raise ValueError("The FM plan needs at least 10 distinct frames after the execution prefix")
-            self.future_indices = np.linspace(execute_steps, future_horizon - 1, GOAL_K).round().astype(int)
+        self.execute_steps, self.horizon, self.window_mode = execute_steps, horizon, window
+        if window == "official" and horizon < execute_steps - 1 + REFERENCE_LEAD + GOAL_K:
+            raise ValueError("The FM plan is too short for a 10-frame window at every execution step")
+        if window == "spread" and horizon - execute_steps < GOAL_K:
+            raise ValueError("The FM plan needs at least 10 distinct frames after the execution prefix")
         self.frames = None
+
+    def window_indices(self, k):
+        """Plan frames the tracker sees at execution step ``k`` of a plan."""
+        if self.window_mode == "spread":
+            return np.linspace(self.execute_steps, self.horizon - 1, GOAL_K).round().astype(int)
+        return np.arange(k + REFERENCE_LEAD, k + REFERENCE_LEAD + GOAL_K)
 
     def update(self, pos, quat):
         # In the paired stand's axes, scale each endpoint's displacement from rest.
@@ -55,17 +72,15 @@ class HumanFiveReference:
         self.frames = frames.reshape(len(pos), -1)
 
     def window(self, step_id, imu_quat, q):
-        if self.future_indices is not None:
-            return self.frames[self.future_indices]
-        start = step_id % self.execute_steps
-        return self.frames[start:start + GOAL_K]
+        # Plans start at step 0 of an episode and every execute_steps after it.
+        return self.frames[self.window_indices(step_id % self.execute_steps)]
 
     def reset(self):
         self.frames = None
 
 
 class OfficialFiveController(FivePointPlanner):
-    def __init__(self, env, fm_path, *, sample_future=True, release=Path("downloads/morphmimic-v0.1"),
+    def __init__(self, env, fm_path, *, tracker_window="official", release=Path("downloads/morphmimic-v0.1"),
                  g1_export=None):
         super().__init__(env, fm_path)
         export = release / "morphmimic_policy" if g1_export is None else g1_export
@@ -73,9 +88,9 @@ class OfficialFiveController(FivePointPlanner):
         robot = json.loads((export / f"{robot_name}.json").read_text())["robot"]
         self.reference = HumanFiveReference(release / "source/deploy/vr_teleop/gmr_configs/stand.json",
                                             robot["tracked_bodies"], self.fm.execute_steps,
-                                            future_horizon=self.fm.horizon if sample_future else None)
-        if sample_future:
-            print(f"Tracker future frames (zero-based): {self.reference.future_indices.tolist()}", flush=True)
+                                            horizon=self.fm.horizon, window=tracker_window)
+        print(f"Tracker window {tracker_window}: plan frames {self.reference.window_indices(0).tolist()} "
+              f"at the planning step", flush=True)
         self.runner = PolicyRunner(export, robot_name, self.reference, interface="human", human_points="five")
         self.action_term = env.action_manager.get_term("joint_pos")
         if (self.runner.robot.native_joint_names != C.BODY_JOINT_NAMES or

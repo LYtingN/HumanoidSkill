@@ -45,6 +45,60 @@ def heading_features_batch(robot_quat, windows, mask):
     return rot6d(rel).reshape(len(windows), -1)
 
 
+# Torch copies of the release's NumPy quaternion helpers (deploy.sim2sim.obs), any leading dims, wxyz.
+def _t_quat_mul(a, b):
+    aw, ax, ay, az = a.unbind(-1)
+    bw, bx, by, bz = b.unbind(-1)
+    return torch.stack((aw * bw - ax * bx - ay * by - az * bz, aw * bx + ax * bw + ay * bz - az * by,
+                        aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw), -1)
+
+
+def _t_quat_inv(q):
+    conj = q * q.new_tensor([1.0, -1.0, -1.0, -1.0])
+    return conj / (q * q).sum(-1, keepdim=True).clamp_min(1e-9)
+
+
+def _t_rotate_back(q, v):
+    """Rotate ``v`` by the inverse of the unit quaternion ``q`` (broadcast)."""
+    w, xyz = q[..., :1], q[..., 1:]
+    xyz, v = torch.broadcast_tensors(xyz, v)
+    t = 2.0 * torch.linalg.cross(xyz, v, dim=-1)
+    return v - w * t + torch.linalg.cross(xyz, t, dim=-1)
+
+
+def _t_yaw_quat(q):
+    w, x, y, z = q.unbind(-1)
+    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    zero = torch.zeros_like(yaw)
+    return torch.stack((torch.cos(yaw / 2.0), zero, zero, torch.sin(yaw / 2.0)), -1)
+
+
+def _t_rot6d(q):
+    r, i, j, k = q.unbind(-1)
+    s = 2.0 / (q * q).sum(-1)
+    return torch.stack((1 - s * (j * j + k * k), s * (i * j - k * r), s * (i * j + k * r), 1 - s * (i * i + k * k),
+                        s * (i * k - j * r), s * (j * k + i * r)), -1)
+
+
+def human_features_torch(windows, mask):
+    """:func:`human_features_batch` on the device: windows [..., K, 168] -> [..., K * 24 * 9]."""
+    frames = windows.unflatten(-1, (24, 7))
+    pos, quat = frames[..., :3], frames[..., 3:]
+    a = _anchor(mask)
+    yaw = _t_yaw_quat(quat[..., 0, a, :])[..., None, None, :]
+    origin = torch.stack((pos[..., 0, a, 0], pos[..., 0, a, 1], torch.zeros_like(pos[..., 0, a, 0])), -1)[..., None, None, :]
+    pos = _t_rotate_back(yaw, pos - origin)
+    rot = _t_rot6d(_t_quat_mul(_t_quat_inv(yaw), quat))
+    return torch.cat((pos, rot), -1).flatten(-3)
+
+
+def heading_features_torch(robot_quat, slot_quat):
+    """:func:`heading_features_batch` on the device from the heading slot's orientations [N, K, 4]."""
+    undo = slot_quat.new_tensor(_UNDO)
+    rel = _t_quat_mul(_t_quat_inv(robot_quat)[:, None], _t_quat_mul(slot_quat, undo))
+    return _t_rot6d(rel).flatten(-2)
+
+
 def anchor_quat_batch(robot, imu_quat, q):
     """`Robot.anchor_quat` of IMU orientations [N, 4] and native joint positions [N, J]."""
     n = len(q)
@@ -63,15 +117,18 @@ class BatchedHumanFive:
     """The v0.1 PolicyRunner's human/five inputs for N robots at once, one ONNX call per step.
 
     Reproduces per-world ``PolicyRunner(..., interface="human", human_points="five")`` with a
-    :class:`HumanFiveReference` that holds ten sampled future frames of each plan.
+    :class:`HumanFiveReference` of the same ``window`` (official: plan frames k+1 .. k+10 at
+    execution step k; spread: the legacy held frames). Every world replans at the same step.
     """
 
-    def __init__(self, release: Path, n: int, execute_steps: int, horizon: int, device="cpu"):
+    def __init__(self, release: Path, n: int, execute_steps: int, horizon: int, device="cpu", window="official"):
         export = release / "morphmimic_policy"
         tracked = json.loads((export / "g1_amber.json").read_text())["robot"]["tracked_bodies"]
         stand = release / "source/deploy/vr_teleop/gmr_configs/stand.json"
         # One reference converts every world's frames: its update is independent per frame.
-        self.reference = HumanFiveReference(stand, tracked, execute_steps, future_horizon=horizon)
+        self.reference = HumanFiveReference(stand, tracked, execute_steps, horizon=horizon, window=window)
+        self.plan_frames = None
+        self.k = self.selected = 0  # execution step within the plan; step whose window is loaded
         self.runner = PolicyRunner(export, "g1_amber", self.reference, interface="human", human_points="five")
         self.robot, self.n = self.runner.robot, n
         self.mask = self.runner.point_mask
@@ -98,17 +155,46 @@ class BatchedHumanFive:
 
     def set_plan(self, pos, quat):
         """World keypoint plans [N, H, 5, 3] and [N, H, 5, 4] (NumPy)."""
-        idx = self.reference.future_indices
-        n, k = len(pos), len(idx)
-        self.reference.update(pos[:, idx].reshape(n * k, 5, 3), quat[:, idx].reshape(n * k, 5, 4))
-        self.windows = self.reference.frames.reshape(n, k, -1)
+        n, h = pos.shape[:2]
+        self.k = 0
+        if self.graph is not None:
+            # On the device: retarget only the plan frames some window reads, then build the goal features of
+            # every execution step's window at once (the official window slides every step).
+            ref = self.reference
+            steps = range(ref.execute_steps) if ref.window_mode == "official" else [0]
+            idx = np.stack([ref.window_indices(k) for k in steps])  # [W, K]
+            need = np.unique(idx)
+            ref.update(pos[:, need].reshape(n * len(need), 5, 3), quat[:, need].reshape(n * len(need), 5, 4))
+            device = self.graph.device
+            frames = torch.as_tensor(ref.frames.reshape(n, len(need), -1), device=device, dtype=torch.float64)
+            windows = frames[:, torch.as_tensor(np.searchsorted(need, idx), device=device)]  # [N, W, K, 168]
+            self.window_features = human_features_torch(windows, self.mask).float()  # [N, W, K * 216]
+            slot = HUMAN_SPINE3 if self.mask[HUMAN_SPINE3] else _anchor(self.mask)
+            self.window_slot_quat = windows.unflatten(-1, (24, 7))[..., slot, 3:]  # [N, W, K, 4]
+            self.device_features = self.window_features[:, 0]
+            return
+        self.reference.update(pos.reshape(n * h, 5, 3), quat.reshape(n * h, 5, 4))
+        self.plan_frames = self.reference.frames.reshape(n, h, -1)
+        self._select(0)
+
+    def _select(self, k):
+        """Load the human goal window of execution step ``k``."""
+        self.windows = self.plan_frames[:, self.reference.window_indices(k)]
         self.features = human_features_batch(self.windows, self.mask).astype(np.float32)
         if self.graph is not None:
             self.device_features = torch.as_tensor(self.features, device=self.graph.device)
+        self.selected = k
 
     def step(self, imu, gyro, q, dq):
         """Native joint targets [N, J] for IMU orientations [N, 4], gyros [N, 3] and joints [N, J]."""
         robot, n = self.robot, self.n
+        on_device = self.graph is not None
+        if on_device:
+            w = min(self.k, self.window_features.shape[1] - 1)
+            self.device_features = self.window_features[:, w]
+        elif self.reference.window_mode == "official" and self.selected != self.k:
+            self._select(self.k)
+        self.k += 1
         quat = imu / np.linalg.norm(imu, axis=-1, keepdims=True)
         gravity = np_rotate_back(quat, np.array([0.0, 0.0, -1.0]))
         frame = np.concatenate([robot.to_canonical(q) - self.default_canonical, robot.to_canonical_delta(dq),
@@ -120,14 +206,16 @@ class BatchedHumanFive:
         feeds = {"obs_history": self.history.reshape(n, -1),
                  "human_point_mask": np.broadcast_to(self.mask, (n, len(self.mask))).copy(),
                  "human_frame_mask": np.ones((n, GOAL_K), bool),
-                 "human_heading": heading_features_batch(torso, self.windows, self.mask).astype(np.float32),
                  "human_heading_mask": np.ones(n, bool)}
-        if self.graph is None:
+        if not on_device:
+            feeds["human_heading"] = heading_features_batch(torso, self.windows, self.mask).astype(np.float32)
             feeds.update(self.runner.inputs, goal_human=self.features)
             action = self.runner.session.run(["action_human"], feeds)[0].astype(np.float64)
         else:
             device = self.graph.device
             feeds = {k: torch.as_tensor(v, device=device) for k, v in feeds.items()}
+            torso_t = torch.as_tensor(torso, device=device, dtype=torch.float64)
+            feeds["human_heading"] = heading_features_torch(torso_t, self.window_slot_quat[:, w]).float()
             feeds.update(self.constants, goal_human=self.device_features)
             action = self.graph.run(["action_human"], feeds)[0].double().cpu().numpy()
         self.last_action = action
@@ -138,8 +226,10 @@ class BatchedHumanFive:
 
 class BatchedOfficialFive(DiffusionObservations):
     def __init__(self, env, fm_path: Path, release: Path = Path("downloads/morphmimic-v0.1"), fm_batch: int = 256,
-                 tracker_device=None, gripper_hysteresis=(0.02, 0.05), wrist_height_bias=None):
+                 tracker_device=None, gripper_hysteresis=(0.02, 0.05), wrist_height_bias=None,
+                 tracker_window="official"):
         self.env = env
+        self.tracker_window = tracker_window
         # The v0.1 tracker's steady wrist height error grows with how high the hand is held:
         # error ~ c0 + c1 * h (m), h the target wrist height above the target pelvis. With (c0, c1)
         # the tracker receives wrist targets lowered by that error, i.e. raised when c1 h dominates.
@@ -155,7 +245,7 @@ class BatchedOfficialFive(DiffusionObservations):
         super().__init__(env, self.fm.obs_horizon, ds["image_size"], "head_camera")
         self.n = env.num_envs
         self.tracker = BatchedHumanFive(release, self.n, self.fm.execute_steps, self.fm.horizon,
-                                        device=tracker_device or env.device)
+                                        device=tracker_device or env.device, window=tracker_window)
         robot = self.tracker.robot
         self.action_term = env.action_manager.get_term("joint_pos")
         if robot.native_joint_names != C.BODY_JOINT_NAMES or tuple(self.action_term.target_names) != C.BODY_JOINT_NAMES:
@@ -184,8 +274,8 @@ class BatchedOfficialFive(DiffusionObservations):
         self.bad_plan = torch.zeros(self.n, dtype=torch.bool, device=env.device)
         self.offset = 0
         self.plan_pos = None
-        print(f"Loaded {fm_path.name} and official v0.1 action_human (g1_amber, five slots) for {self.n} worlds",
-              flush=True)
+        print(f"Loaded {fm_path.name} and official v0.1 action_human (g1_amber, five slots, {tracker_window} "
+              f"window) for {self.n} worlds", flush=True)
 
     # ------------------------------------------------------------------ episodes
 
