@@ -119,17 +119,17 @@ svg text{font-family:var(--f-body)}
 <body>
 <div class="wrap">
 <header>
-  <div class="eyebrow">HumanoidSkill · 设计草图 v3 · 2026-11-24</div>
+  <div class="eyebrow">HumanoidSkill · 设计草图 v7 · 2026-11-25</div>
   <h1>视频模仿 DP 管线</h1>
-  <p class="lead">部署时给 G1 一条人的 ego 示范视频。DP encoder 读这条示范和机器人当前的观测，输出 SuperMimic 的 latent z，交给冻结的 SuperMimic decoder 执行。DP encoder 分两侧：上下文侧用可学习 query 压缩示范、回归未来的 3D 场景流；生成侧是一个 masked DiT，先采样 kp̂，再以 kp̂ 为条件采样 z。训练分三个 stage：mocap 蒸馏、人视频、仿真 RL 后训练。</p>
+  <p class="lead">部署时 G1 只看自己的头部相机画面和本体状态。DP encoder 先回归未来的 3D 场景流，再以它为条件生成头和双手的未来轨迹 kp̂，最后生成 SuperMimic 的 latent z，交给冻结的 SuperMimic decoder 执行。人 ego 视频和部署任务相同，只当训练数据，部署时不输入示范。训练分三个 stage：mocap 蒸馏、人视频、仿真 RL 后训练，全程不用遥操作。</p>
 </header>
 
 <section>
   <h2>三条设计约束</h2>
   <div class="pillars">
     <div class="pillar"><b>3 点是唯一枢纽</b><span>mocap 有 3 点和 z，没有图像；人视频有图像和 3 点，没有 z。头和双手的 3 点是两份数据唯一的交集，所以模型拆成"ego → 3 点"和"3 点 → z"两段来学，两段之间的耦合交给 RL。</span></div>
-    <div class="pillar"><b>kp̂ 是生成出来的，不是照抄示范</b><span>示范里物体的位置和机器人眼前的场景不一样，而且改写的方式不止一种。kp̂ 用扩散生成，再作为 z 的条件。</span></div>
-    <div class="pillar"><b>stage 3 第一次凑齐配对数据</b><span>仿真 rollout 同时有图像、3 点、z、本体状态和精确的场景流。成功的 rollout 既能当机器人示范，也能当配对的监督。</span></div>
+    <div class="pillar"><b>场景流是人机之间的桥</b><span>视觉通路先回归相机稳定的 3D 场景流（全图，包含手 / 机械臂），DiT 读它的隐状态 h_f。人手和夹爪做出相同的物理动作，得到相近的监督，与外观无关。</span></div>
+    <div class="pillar"><b>RL 只改执行者怎么动</b><span>stage 3 的 FlashSAC 只引导 kp 的初始噪声，z 由 DP 忠实执行。成功的 rollout 按轮次蒸馏回 DP 的 kp 通路，z 通路保持 mocap 先验。机器人数据只来自这里。</span></div>
   </div>
 </section>
 
@@ -144,67 +144,40 @@ svg text{font-family:var(--f-body)}
   </div>
   <figure>
     <div class="scroll">
-    <svg viewBox="0 0 1100 530" role="img" aria-label="整体架构：示范视频和当前帧都经冻结的 V-JEPA 2.1 编码；上下文侧的 video query 压缩示范，flow query 确定性回归 3D 场景流并输出 h_f；生成侧 masked DiT 以这些为干净条件，先去噪 kp tokens 得到 kp̂，再去噪 z tokens；z 交给冻结的 SuperMimic decoder 驱动 G1。">
+    <svg viewBox="0 0 1100 490" role="img" aria-label="整体架构：当前帧经冻结的 V-JEPA 2.1 编码；上下文侧的 flow query 确定性回归 3D 场景流并输出 h_f；生成侧 masked DiT 以当前帧特征、h_f、本体和上一段 z 为干净条件，先去噪 kp tokens 得到 kp̂，再去噪 z tokens；z 交给冻结的 SuperMimic decoder 驱动 G1。">
       <defs>
         <marker id="f1a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
       </defs>
 
-      <!-- inputs -->
-      <rect class="bx" x="20" y="60" width="170" height="48" rx="6"/>
-      <text class="tb" x="34" y="80">示范视频</text>
-      <text class="ts" x="34" y="97">人 ego · 部署时给定</text>
-      <rect class="bx" x="20" y="124" width="170" height="48" rx="6"/>
-      <text class="tb" x="34" y="144">示范 3 点轨迹</text>
-      <text class="ts" x="34" y="161">SLAM + HaMeR → G1</text>
-      <rect class="bx" x="20" y="220" width="170" height="48" rx="6"/>
-      <text class="tb" x="34" y="240">当前帧</text>
-      <text class="ts" x="34" y="257">G1 头部相机</text>
-      <rect class="bx" x="20" y="430" width="170" height="48" rx="6"/>
-      <text class="tb" x="34" y="450">本体 + zₜ₋₁</text>
-      <text class="ts" x="34" y="467">obs_hist · 上一段 z</text>
+      <rect class="bx" x="20" y="140" width="170" height="48" rx="6"/>
+      <text class="tb" x="34" y="160">当前帧</text>
+      <text class="ts" x="34" y="177">G1 头部相机 · 不做 mask</text>
+      <rect class="bx" x="20" y="400" width="170" height="48" rx="6"/>
+      <text class="tb" x="34" y="420">本体 + zₜ₋₁</text>
+      <text class="ts" x="34" y="437">obs_hist · 上一段 z</text>
 
-      <!-- encoders -->
-      <rect class="fz" x="210" y="60" width="100" height="48" rx="6"/>
-      <text class="t" x="260" y="80" text-anchor="middle">V-JEPA 2.1</text>
-      <text class="ts" x="260" y="97" text-anchor="middle">视频 · 冻结</text>
-      <rect class="fz" x="210" y="220" width="100" height="48" rx="6"/>
-      <text class="t" x="260" y="240" text-anchor="middle">V-JEPA 2.1</text>
-      <text class="ts" x="260" y="257" text-anchor="middle">图像 · 冻结</text>
-      <line class="e" x1="190" y1="84" x2="208" y2="84" marker-end="url(#f1a)"/>
-      <line class="e" x1="190" y1="244" x2="208" y2="244" marker-end="url(#f1a)"/>
+      <rect class="fz" x="210" y="140" width="100" height="48" rx="6"/>
+      <text class="t" x="260" y="160" text-anchor="middle">V-JEPA 2.1</text>
+      <text class="ts" x="260" y="177" text-anchor="middle">图像 · 冻结</text>
+      <line class="e" x1="190" y1="164" x2="208" y2="164" marker-end="url(#f1a)"/>
 
-      <!-- context side -->
-      <rect class="frame" x="355" y="30" width="240" height="300" rx="10"/>
-      <text class="tl" x="367" y="48">上下文侧 · 每次重规划算一次</text>
-      <rect class="tr" x="375" y="64" width="205" height="96" rx="6"/>
-      <text class="tb" x="477" y="100" text-anchor="middle">video query × Nᵥ</text>
-      <text class="ts" x="477" y="119" text-anchor="middle">读示范 tokens + 示范 3 点</text>
-      <text class="ts" x="477" y="135" text-anchor="middle">→ 意图 tokens</text>
-      <rect class="tr" x="375" y="196" width="205" height="96" rx="6"/>
-      <text class="tb" x="477" y="232" text-anchor="middle">flow query × N_f</text>
-      <text class="ts" x="477" y="251" text-anchor="middle">读意图 tokens + 当前帧特征</text>
-      <text class="ts" x="477" y="267" text-anchor="middle">→ h_f（确定性回归）</text>
+      <rect class="frame" x="355" y="60" width="240" height="260" rx="10"/>
+      <text class="tl" x="367" y="78">上下文侧 · 每次重规划算一次</text>
+      <rect class="tr" x="375" y="100" width="205" height="96" rx="6"/>
+      <text class="tb" x="477" y="136" text-anchor="middle">flow query × N_f</text>
+      <text class="ts" x="477" y="155" text-anchor="middle">读当前帧特征</text>
+      <text class="ts" x="477" y="171" text-anchor="middle">→ h_f（确定性回归）</text>
+      <line class="e" x1="310" y1="164" x2="373" y2="164" marker-end="url(#f1a)"/>
+      <line class="e" x1="477" y1="196" x2="477" y2="248" marker-end="url(#f1a)"/>
+      <rect class="sp" x="375" y="250" width="205" height="52" rx="6"/>
+      <text class="t" x="477" y="271" text-anchor="middle">3D 场景流 · MSE</text>
+      <text class="ts" x="477" y="289" text-anchor="middle">全图 · 含执行者 · 相机稳定 · 仅训练</text>
 
-      <line class="e" x1="310" y1="84" x2="373" y2="84" marker-end="url(#f1a)"/>
-      <text class="tl" x="342" y="77" text-anchor="middle">示范 tokens</text>
-      <line class="e" x1="190" y1="148" x2="373" y2="148" marker-end="url(#f1a)"/>
-      <text class="tl" x="282" y="141" text-anchor="middle">示范 3 点</text>
-      <line class="e" x1="477" y1="160" x2="477" y2="194" marker-end="url(#f1a)"/>
-      <text class="tl" x="485" y="181">意图 tokens</text>
-      <line class="e" x1="310" y1="244" x2="373" y2="244" marker-end="url(#f1a)"/>
-      <text class="tl" x="342" y="237" text-anchor="middle">当前帧特征</text>
-
-      <line class="e" x1="477" y1="292" x2="477" y2="368" marker-end="url(#f1a)"/>
-      <rect class="sp" x="375" y="370" width="205" height="44" rx="6"/>
-      <text class="t" x="477" y="388" text-anchor="middle">3D 场景流 · MSE</text>
-      <text class="ts" x="477" y="405" text-anchor="middle">相机稳定 · 去掉执行者 · 仅训练</text>
-
-      <!-- generation side -->
       <rect class="trf" x="630" y="30" width="250" height="330" rx="10"/>
       <text class="ttr" x="642" y="50">masked DiT（flow matching）</text>
       <rect class="bx" x="650" y="64" width="210" height="106" rx="6"/>
       <text class="tb" x="755" y="90" text-anchor="middle">条件 tokens（干净）</text>
-      <text class="ts" x="755" y="109" text-anchor="middle">意图 · 当前帧 · h_f</text>
+      <text class="ts" x="755" y="109" text-anchor="middle">当前帧特征 · h_f</text>
       <text class="ts" x="755" y="125" text-anchor="middle">本体 · zₜ₋₁ · 来源 token</text>
       <text class="ts" x="755" y="145" text-anchor="middle">只被读、不读目标 → KV 可缓存</text>
       <rect class="tr" x="650" y="190" width="210" height="70" rx="6"/>
@@ -221,18 +194,16 @@ svg text{font-family:var(--f-body)}
       <line class="e" x1="812" y1="260" x2="812" y2="282" marker-end="url(#f1a)"/>
       <line class="e" x1="745" y1="312" x2="763" y2="312" marker-end="url(#f1a)"/>
 
-      <!-- conditions into DiT -->
-      <line class="e" x1="580" y1="100" x2="648" y2="100" marker-end="url(#f1a)"/>
-      <text class="tl" x="614" y="93" text-anchor="middle">意图</text>
-      <path class="e" d="M580,206 L612,206 L612,150 L648,150" marker-end="url(#f1a)"/>
-      <text class="tl" x="617" y="184">h_f · 当前帧</text>
-      <path class="e" d="M190,454 L622,454 L622,160 L648,160" marker-end="url(#f1a)"/>
-      <text class="tl" x="400" y="447" text-anchor="middle">本体 · zₜ₋₁</text>
+      <line class="e" x1="580" y1="120" x2="648" y2="120" marker-end="url(#f1a)"/>
+      <text class="tl" x="614" y="113" text-anchor="middle">h_f</text>
+      <path class="e" d="M260,188 L260,376 L612,376 L612,150 L648,150" marker-end="url(#f1a)"/>
+      <text class="tl" x="440" y="369" text-anchor="middle">当前帧特征</text>
+      <path class="e" d="M190,424 L622,424 L622,160 L648,160" marker-end="url(#f1a)"/>
+      <text class="tl" x="400" y="417" text-anchor="middle">本体 · zₜ₋₁</text>
 
-      <!-- outputs -->
       <line class="e" x1="697" y1="340" x2="697" y2="388" marker-end="url(#f1a)"/>
       <rect class="sp" x="650" y="390" width="130" height="44" rx="6"/>
-      <text class="t" x="715" y="408" text-anchor="middle">kp̂ + 进度 φ</text>
+      <text class="t" x="715" y="408" text-anchor="middle">kp̂（头 + 双手）</text>
       <text class="ts" x="715" y="425" text-anchor="middle">训练时监督</text>
 
       <line class="e" x1="860" y1="312" x2="898" y2="312" marker-end="url(#f1a)"/>
@@ -245,30 +216,28 @@ svg text{font-family:var(--f-body)}
       <line class="e" x1="990" y1="340" x2="990" y2="398" marker-end="url(#f1a)"/>
       <text class="tl" x="998" y="374">a</text>
 
-      <!-- closed loop -->
-      <path class="e" d="M990,444 L990,510 L105,510 L105,480" marker-end="url(#f1a)"/>
-      <text class="tl" x="500" y="503" text-anchor="middle">下一时刻：本体、相机图像</text>
-      <path class="e" d="M890,510 L890,330 L898,330" marker-end="url(#f1a)"/>
-      <text class="tl" x="884" y="470" text-anchor="end">obs_hist</text>
+      <path class="e" d="M990,444 L990,470 L105,470 L105,450" marker-end="url(#f1a)"/>
+      <text class="tl" x="560" y="463" text-anchor="middle">下一时刻：本体、相机图像</text>
+      <path class="e" d="M890,470 L890,330 L898,330" marker-end="url(#f1a)"/>
+      <text class="tl" x="884" y="400" text-anchor="end">obs_hist</text>
     </svg>
     </div>
-    <figcaption>每次重规划时，上下文侧只算一次：video query 把示范压缩成意图 tokens，flow query 用确定性回归预测相机稳定的 3D 场景流，并把它的隐状态 h_f 交给 DiT 作为条件（方案 B，"先想未来再行动"）。生成侧先对 kp tokens 去噪得到 kp̂，再把 kp̂ 固定为干净条件，对 z tokens 去噪。z 直接交给冻结的 decoder 执行。SuperMimic 的身体 WM f_ω 不在推理路径上，只在 stage 3 辅助训练，用法和 SuperMimic 训练自己的策略时一样。</figcaption>
+    <figcaption>每次重规划时，flow query 只算一次：读当前帧特征，用确定性回归预测相机稳定的 3D 场景流，并把隐状态 h_f 交给 DiT 作为条件（方案 B，"先想未来再行动"）。生成侧先对 kp tokens 去噪得到 kp̂，再把 kp̂ 固定为干净条件，对 z tokens 去噪。z 直接交给冻结的 decoder 执行。部署时不输入示范视频。SuperMimic 的身体 WM f_ω 不在推理路径上，只在 stage 1 的想象蒸馏里用。</figcaption>
   </figure>
 </section>
 
 <section>
   <h2>视觉组件</h2>
-  <p>视觉模型有两个角色：输入编码器每个控制周期都要跑，预测目标只在训练时当标签。示范和当前帧用同一个编码器，这样模型可以直接在同一个特征空间里比对"示范进行到哪一步"和"示范里的物体对应眼前哪一个"。</p>
+  <p>只有一路视觉输入：机器人当前的头部相机画面，不做 mask。人机之间的外观差异主要靠场景流这个预测目标来弥合：它描述的是物理上发生了什么，表示在扣除相机运动后的 3D 坐标里。</p>
   <div class="tablewrap">
   <table>
     <thead><tr><th>位置</th><th>选择</th><th>依据</th><th>消融项</th></tr></thead>
     <tbody>
       <tr class="grp"><th colspan="4">输入编码器（冻结，推理时必需）</th></tr>
-      <tr><th>当前帧</th><td>V-JEPA 2.1 图像模式（可选：喂 2–4 帧历史，用视频模式）</td><td>ω-0 用的就是它；把当前帧编码器换成 Wan，成功率 79.1 → 63.6</td><td>两边都用 DINOv3</td></tr>
-      <tr><th>示范视频</th><td>V-JEPA 2.1 视频模式</td><td>需要时序；和当前帧共享特征空间；示范只离线编码一次</td><td>DINOv3 逐帧 + 时序层</td></tr>
+      <tr><th>当前帧</th><td>V-JEPA 2.1 图像模式，不做 mask</td><td>ω-0 用的就是它；把当前帧编码器换成 Wan，成功率 79.1 → 63.6</td><td>DINOv3</td></tr>
       <tr class="grp"><th colspan="4">预测目标</th></tr>
-      <tr><th>执行者的运动</th><td>kp̂：头 + 双手 3 点，masked DiT 里扩散生成</td><td>要执行，必须是一个合法的样本；改写示范有多种方式</td><td>—</td></tr>
-      <tr><th>动作的效果</th><td>相机稳定的 3D 场景流，flow query 确定性回归，h_f 被 DiT 读取（方案 B）</td><td>EgoWAM：场景流在人机数据不对齐时最稳；ω-0：去掉 video query 成功率降 14.6 个点</td><td>方案 A（EgoWAM 式，只读不写、部署丢掉）；DINO 未来特征；Wan latent</td></tr>
+      <tr><th>执行者的运动</th><td>kp̂：头 + 双手 3 点，masked DiT 里扩散生成</td><td>要执行，必须是一个合法的样本；同一场景下的做法不止一种</td><td>—</td></tr>
+      <tr><th>动作的效果</th><td>相机稳定的 3D 场景流，全图查询点、包含执行者；flow query 确定性回归，h_f 被 DiT 读取（方案 B）</td><td>EgoWAM：场景流在人机数据不对齐时最稳，静止点过滤后运动点大多落在手 / 机械臂上；ω-0：去掉预测自身未来的 video query，成功率降 14.6 个点</td><td>只留物体点；方案 A（EgoWAM 式，只读不写、部署丢掉）；DINO 未来特征；Wan latent</td></tr>
     </tbody>
   </table>
   </div>
@@ -276,42 +245,50 @@ svg text{font-family:var(--f-body)}
 
 <section>
   <h2>Mask 与噪声配置</h2>
-  <p>"DP encoder"指上下文侧加 masked DiT 的整体。每个 stage 缺失的条件换成空 token；目标 token 用噪声水平和损失权重控制要不要学。</p>
+  <p>"DP encoder"指 flow query 加 masked DiT 的整体。它是一个 uni model：每个 token 的角色由噪声水平 τ 和损失权重决定。</p>
+  <div class="tablewrap">
+  <table style="min-width:520px">
+    <thead><tr><th>状态</th><th>输入</th><th>loss</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><th>条件</th><td>干净值，τ = 0</td><td>无</td><td>已知，只被读</td></tr>
+      <tr><th>目标</th><td>加噪，τ ∈ (0, 1)</td><td>flow matching</td><td>要生成</td></tr>
+      <tr><th>缺失</th><td>纯噪声，τ = 1</td><td>0</td><td>既不当条件，也不监督</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>只当条件、不生成的输入（当前帧、h_f、本体、zₜ₋₁）只有"给 / 空 token"两种状态。生成模态（kp、z）缺数据时用 τ = 1、权重 0，不用空 token：τ = 1 等价于把这个模态边缘化，部署第 ① 步去噪 kp 时 z 也正处在 τ = 1，训练和推理一致。两步采样对应的两种配置（kp 目标 + z 缺失；kp 条件 + z 目标）要显式、高概率地采到。</p>
   <div class="tablewrap">
   <table>
     <thead><tr><th></th><th>Stage 1 · mocap</th><th>Stage 2 · 人视频</th><th>Stage 3 · 仿真 RL</th><th>部署</th></tr></thead>
     <tbody>
       <tr class="grp"><th colspan="5">条件（干净 token）</th></tr>
-      <tr><th>示范视频 → video query</th><td><span class="c null">空</span></td><td>视频 A</td><td>人 / 机器人视频，按 α 混合</td><td>人 ego 视频</td></tr>
-      <tr><th>示范 3 点</th><td>同一 clip 的 FK，加空间偏移和时间扭曲</td><td>A 的伪标签</td><td>示范的伪标签或 FK</td><td>示范的伪标签</td></tr>
-      <tr><th>当前帧</th><td><span class="c null">空</span></td><td>视频 B 的帧（≤ t）</td><td>G1 相机渲染</td><td>G1 真实相机</td></tr>
+      <tr><th>当前帧</th><td><span class="c null">空</span></td><td>视频的第 t 帧</td><td>G1 相机渲染</td><td>G1 真实相机</td></tr>
       <tr><th>h_f</th><td><span class="c null">空</span></td><td>flow query 输出</td><td>flow query 输出</td><td>flow query 输出</td></tr>
       <tr><th>本体 + zₜ₋₁</th><td>student 访问到的状态</td><td><span class="c null">空</span></td><td>仿真本体</td><td>真实本体</td></tr>
-      <tr><th>来源 token</th><td>示范 = mocap，当前 = mocap</td><td>示范 = 人，当前 = 人</td><td>示范 = 人或机器人，当前 = 机器人</td><td>示范 = 人，当前 = 机器人</td></tr>
+      <tr><th>来源 token</th><td>mocap</td><td>人</td><td>机器人</td><td>机器人</td></tr>
       <tr class="grp"><th colspan="5">目标 token 与 query</th></tr>
-      <tr><th>kp tokens</th><td><span class="c sup">FK 未来 3 点</span></td><td><span class="c sup">B 的未来 3 点</span></td><td><span class="c sup">rollout 的 FK 真值</span></td><td>先采样</td></tr>
-      <tr><th>z tokens</th><td><span class="c sup">z* = enc_motion(g)</span></td><td><span class="c null">纯噪声，损失权重 0</span>，混入 stage 1 batch</td><td><span class="c rl">DSRL</span> + 成功自模仿</td><td>后采样</td></tr>
-      <tr><th>flow query</th><td><span class="c null">不训练</span></td><td><span class="c sup">Track4World 标签</span></td><td><span class="c sup">仿真真值</span>，按 β 混合</td><td>只算 h_f</td></tr>
+      <tr><th>kp tokens</th><td><span class="c sup">FK 未来 3 点</span>（作条件或作目标）</td><td><span class="c sup">同一视频的未来 3 点</span></td><td>RL：<span class="c rl">π_w 给 ε_kp</span>；蒸馏：<span class="c sup">成功 rollout 下发的 kp̂</span></td><td>先采样</td></tr>
+      <tr><th>z tokens</th><td><span class="c sup">z* = enc_motion(g)</span></td><td><span class="c null">缺失（τ = 1，权重 0）</span>，混入 stage 1 batch</td><td>RL：DP 自采样；蒸馏：<span class="c null">缺失</span>，混入 stage 1 batch</td><td>后采样</td></tr>
+      <tr><th>flow query</th><td><span class="c null">不训练</span></td><td><span class="c sup">Track4World 标签（全图）</span></td><td><span class="c sup">仿真真值（全图）</span>，全部 rollout</td><td>只算 h_f</td></tr>
       <tr class="grp"><th colspan="5">参数</th></tr>
-      <tr><th>训练</th><td><span class="c train">masked DiT 全部</span></td><td><span class="c train">video query、flow query、DiT</span></td><td><span class="c rl">噪声策略 π_w</span> <span class="c train">DP 慢更新</span> <span class="c train">f_ω 交替重拟合</span></td><td>—</td></tr>
-      <tr><th>冻结</th><td colspan="4"><span class="c fz">V-JEPA 2.1</span> <span class="c fz">SuperMimic encoder / decoder</span>（全程）；f_ω 只在每次策略更新内冻结，和 SuperMimic 一致</td></tr>
+      <tr><th>训练</th><td><span class="c train">masked DiT 全部</span></td><td><span class="c train">flow query、当前帧通路、kp 分支</span></td><td>RL：<span class="c rl">π_w、critic</span>；蒸馏：<span class="c train">当前帧通路、kp 分支、flow query</span></td><td>—</td></tr>
+      <tr><th>冻结</th><td colspan="4"><span class="c fz">V-JEPA 2.1</span> <span class="c fz">SuperMimic encoder / decoder</span>（全程）；stage 3 的 RL 阶段 DP 整体冻结，蒸馏阶段 z 分支基本不动</td></tr>
     </tbody>
   </table>
   </div>
   <ul>
     <li><b>条件只被读、不读目标。</b>注意力 mask 这样设，条件部分的 KV 就能在所有去噪步之间缓存，DiT 每一步只处理 kp 和 z 这几个 token。</li>
-    <li><b>条件 dropout 在所有 stage 都做。</b>有数据也按一定概率换成空 token，比如 stage 3 偶尔去掉示范 3 点、偶尔去掉 h_f。模型不能靠"哪些输入是空的"来反推所处的 stage，部署时某一路信号缺失也有对应的处理方式。</li>
+    <li><b>条件 dropout 在所有 stage 都做。</b>有数据也按一定概率换成空 token。模型不能靠"哪些输入是空的"来反推所处的 stage，部署时某一路信号缺失也有对应的处理方式。</li>
     <li><b>kp̂ 的 exposure bias。</b>训练时 z 看到的 kp 条件是加噪的真值，推理时是自己采出来的 kp̂。按比例换成模型自己的预测（scheduled sampling），或让真值噪声的幅度匹配 kp̂ 的实测误差。</li>
-    <li><b>stage 1 防照抄。</b>示范 3 点和目标来自同一条 clip，所以给输入加偏移和时间扭曲、目标保持干净，让模型学"修正成能执行的轨迹"，而不是逐点复制。</li>
   </ul>
 </section>
 
 <section class="stage">
   <div class="stage-head"><h2>Stage 1 · mocap 蒸馏</h2><span class="tag">MorphMimic 式蒸馏</span><span class="tag">无图像</span></div>
-  <p>先用 BONES-SEED 学会"3 点 → z"，同时学会下半身的补全和 z 的时间一致性。训练方式照搬 MorphMimic 的 student 蒸馏：teacher（enc_motion + decoder）冻结；仿真里一半环境由 DP 执行，rollout 进 replay buffer；标签在 f_ω 的想象里、用 student 自己访问到的状态当场计算。z 的标签来自 enc_motion，所以生成的 z 天然落在 decoder 认识的流形上。</p>
+  <p>先用 BONES-SEED 学会"3 点 → z"，同时学会下半身的补全和 z 的时间一致性。主要配置是 kp 作条件、z 作目标，即 p(z | kp, 本体, zₜ₋₁)，对应 MorphMimic HumanEncoder 的角色；同时以较低概率让 kp 作目标，学一个不看图像的 kp 先验。训练方式照搬 MorphMimic 的 student 蒸馏：teacher（enc_motion + decoder）冻结；仿真里一半环境由 DP 执行，rollout 进 replay buffer；标签在 f_ω 的想象里、用 student 自己访问到的状态当场计算。</p>
   <figure>
     <div class="scroll">
-    <svg viewBox="0 0 1000 280" role="img" aria-label="Stage 1：同一条 mocap clip 经 FK 得到示范 3 点输入 DP，监督目标是未来 3 点和 enc_motion 给出的 z*；student 在仿真和 f_ω 想象里自己访问到的状态送回 DP 的本体输入，标签在这些状态上当场计算。">
+    <svg viewBox="0 0 1000 280" role="img" aria-label="Stage 1：mocap clip 经 FK 得到未来 3 点作为 kp tokens 输入 DP，监督目标是 enc_motion 给出的 z*（kp 作目标时也监督 kp̂）；student 在仿真和 f_ω 想象里自己访问到的状态送回 DP 的本体输入，标签在这些状态上当场计算。">
       <defs>
         <marker id="s1a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
       </defs>
@@ -319,14 +296,14 @@ svg text{font-family:var(--f-body)}
       <text class="tb" x="105" y="125" text-anchor="middle">BONES-SEED clip</text>
       <text class="ts" x="105" y="143" text-anchor="middle">G1 关节空间 · 264 h</text>
       <rect class="bx" x="230" y="100" width="170" height="60" rx="6"/>
-      <text class="t" x="315" y="125" text-anchor="middle">FK → 头 + 双手</text>
-      <text class="ts" x="315" y="143" text-anchor="middle">加偏移 · 缩放 · 时间扭曲</text>
+      <text class="t" x="315" y="125" text-anchor="middle">FK → 未来 3 点</text>
+      <text class="ts" x="315" y="143" text-anchor="middle">头 + 双手 · 脚 mask</text>
       <line class="e" x1="190" y1="130" x2="228" y2="130" marker-end="url(#s1a)"/>
       <rect class="tr" x="450" y="80" width="190" height="100" rx="6"/>
       <text class="tb" x="545" y="124" text-anchor="middle">DP encoder</text>
-      <text class="ts" x="545" y="143" text-anchor="middle">示范视频、当前帧、h_f：空</text>
+      <text class="ts" x="545" y="143" text-anchor="middle">当前帧、h_f：空</text>
       <line class="e" x1="400" y1="130" x2="448" y2="130" marker-end="url(#s1a)"/>
-      <text class="tl" x="425" y="122" text-anchor="middle">示范 3 点</text>
+      <text class="tl" x="425" y="122" text-anchor="middle">kp tokens</text>
       <rect class="bx" x="690" y="60" width="80" height="36" rx="6"/>
       <text class="t" x="730" y="83" text-anchor="middle">kp̂</text>
       <rect class="bx" x="690" y="164" width="80" height="36" rx="6"/>
@@ -334,7 +311,7 @@ svg text{font-family:var(--f-body)}
       <line class="e" x1="640" y1="100" x2="688" y2="80" marker-end="url(#s1a)"/>
       <line class="e" x1="640" y1="160" x2="688" y2="180" marker-end="url(#s1a)"/>
       <rect class="sp" x="800" y="60" width="185" height="36" rx="6"/>
-      <text class="t" x="892" y="83" text-anchor="middle">目标：FK 未来 3 点</text>
+      <text class="t" x="892" y="83" text-anchor="middle">kp 作目标时：FK 未来 3 点</text>
       <rect class="sp" x="800" y="164" width="185" height="36" rx="6"/>
       <text class="t" x="892" y="187" text-anchor="middle">目标：z* = enc_motion(g)</text>
       <line class="es" x1="770" y1="78" x2="800" y2="78"/>
@@ -347,178 +324,163 @@ svg text{font-family:var(--f-body)}
       <text class="tl" x="535" y="206" text-anchor="end">student 访问到的状态，当场算 teacher 标签</text>
     </svg>
     </div>
-    <figcaption>两个目标都来自同一条 clip。enc_motion 只看参考、不看状态，所以标签本身不受 student 影响；在 student 自己访问到的状态上计算标签，修正的是本体状态和 zₜ₋₁ 这两个条件的协变量偏移。想象 rollout 里每一步都对状态做 detach，DP 采样不需要带梯度。</figcaption>
+    <figcaption>enc_motion 只看参考、不看状态，所以 z* 本身不受 student 影响；在 student 自己访问到的状态上计算标签，修正的是本体状态和 zₜ₋₁ 这两个条件的协变量偏移。想象 rollout 里每一步都对状态做 detach，DP 采样不需要带梯度。</figcaption>
   </figure>
   <dl class="facts">
-    <div class="fact"><dt>掩码与输出</dt><dd>脚的字段几乎总是 mask，手偶尔 mask。一次输出一段 z（长度和每 8 步重规划对齐），以 zₜ₋₁ 为条件。</dd></div>
+    <div class="fact"><dt>配置与输出</dt><dd>主要是 kp 条件 → z 目标；脚的字段几乎总是 mask，手偶尔 mask。一次输出一段 z（长度和每 8 步重规划对齐），以 zₜ₋₁ 为条件。</dd></div>
     <div class="fact"><dt>损失</dt><dd>MorphMimic 的 latent 项换成以 z_motion 为目标的 flow matching；动作 copy 项用单步 x0 估计 ẑ₀ 计算，只加在低噪声的 τ 上，以免压掉多峰性。</dd></div>
     <div class="fact"><dt>上线前检查</dt><dd>只给头 + 双手 3 点时，DP 和 MLP HumanEncoder（同一 teacher、同一 decoder）对比头/手误差、摔倒率、‖Δz‖；接近任务姿态的 clip 单独统计。</dd></div>
   </dl>
 </section>
 
 <section class="stage">
-  <div class="stage-head"><h2>Stage 2 · 人视频</h2><span class="tag opt">可选，推荐最简版</span><span class="tag">100 条 ego 视频</span></div>
-  <p>这一步训练视觉通路："示范视频 + 当前帧 → kp̂、场景流"。从同一任务里取两条不同实例的视频，A 当示范，B 当"当前"，模型学着把 A 的 3 点改写成符合 B 场景的 3 点。跳过这一步也能跑（直接用示范 3 点当目标），但 stage 3 的 RL 就要从零学会"根据场景改写示范"。</p>
+  <div class="stage-head"><h2>Stage 2 · 人视频</h2><span class="tag">必需</span><span class="tag">100 条 ego 视频</span><span class="tag">单条视频</span></div>
+  <p>这一步训练视觉通路："当前帧 → 场景流、kp̂"。每个样本只用一条视频：第 t 帧作当前帧，监督同一条视频的未来 3 点和 3D 场景流，和 EgoWAM 的共训设定一样。它是视觉通路唯一的先验来源：没有这一步，DP 在仿真里的初始成功率接近 0，stage 3 的 RL 就没有起点。</p>
   <figure>
     <div class="scroll">
-    <svg viewBox="0 0 1000 260" role="img" aria-label="Stage 2：同任务视频 A 作示范、视频 B 作当前观测，都经冻结的 V-JEPA 2.1 进入 DP；监督 kp̂ 为 B 的未来 3 点伪标签、场景流为 B 的 3D 场景流；z 没有标签，靠混入 stage 1 batch 保持。">
+    <svg viewBox="0 0 1000 250" role="img" aria-label="Stage 2：人 ego 视频的第 t 帧经冻结的 V-JEPA 2.1 进入 DP；监督 kp̂ 为同一视频的未来 3 点伪标签、场景流为同一视频的全图 3D 场景流；z 没有标签，靠混入 stage 1 batch 保持。">
       <defs>
         <marker id="s2a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
       </defs>
-      <text class="tl" x="20" y="26">同任务、不同实例的 (A, B) 配对；A = B 时退化为重建</text>
-      <rect class="bx" x="20" y="40" width="180" height="56" rx="6"/>
-      <text class="tb" x="110" y="64" text-anchor="middle">视频 A：示范</text>
-      <text class="ts" x="110" y="82" text-anchor="middle">含 A 的 3 点伪标签</text>
-      <rect class="bx" x="20" y="180" width="180" height="56" rx="6"/>
-      <text class="tb" x="110" y="204" text-anchor="middle">视频 B：当前（≤ t）</text>
-      <text class="ts" x="110" y="222" text-anchor="middle">本体：空 token</text>
-      <rect class="fz" x="245" y="40" width="120" height="56" rx="6"/>
-      <text class="t" x="305" y="64" text-anchor="middle">V-JEPA 2.1</text>
-      <text class="ts" x="305" y="82" text-anchor="middle">视频 · 冻结</text>
-      <rect class="fz" x="245" y="180" width="120" height="56" rx="6"/>
-      <text class="t" x="305" y="204" text-anchor="middle">V-JEPA 2.1</text>
-      <text class="ts" x="305" y="222" text-anchor="middle">图像 · 冻结</text>
-      <line class="e" x1="200" y1="68" x2="243" y2="68" marker-end="url(#s2a)"/>
-      <line class="e" x1="200" y1="208" x2="243" y2="208" marker-end="url(#s2a)"/>
-      <rect class="tr" x="440" y="40" width="190" height="196" rx="6"/>
-      <text class="tb" x="535" y="130" text-anchor="middle">DP encoder</text>
-      <text class="ts" x="535" y="149" text-anchor="middle">训练 video query、flow query、DiT</text>
-      <line class="e" x1="365" y1="68" x2="438" y2="68" marker-end="url(#s2a)"/>
-      <text class="tl" x="402" y="61" text-anchor="middle">示范 + 3 点</text>
-      <line class="e" x1="365" y1="208" x2="438" y2="208" marker-end="url(#s2a)"/>
-      <text class="tl" x="402" y="201" text-anchor="middle">当前帧特征</text>
-      <rect class="bx" x="680" y="56" width="80" height="36" rx="6"/>
-      <text class="t" x="720" y="79" text-anchor="middle">kp̂</text>
-      <rect class="bx" x="680" y="120" width="80" height="36" rx="6"/>
-      <text class="t" x="720" y="143" text-anchor="middle">场景流</text>
-      <rect class="nl" x="680" y="184" width="80" height="36" rx="6"/>
-      <text class="t" x="720" y="207" text-anchor="middle">z</text>
-      <line class="e" x1="630" y1="74" x2="678" y2="74" marker-end="url(#s2a)"/>
-      <line class="e" x1="630" y1="138" x2="678" y2="138" marker-end="url(#s2a)"/>
-      <line class="e" x1="630" y1="202" x2="678" y2="202" marker-end="url(#s2a)"/>
-      <rect class="sp" x="790" y="56" width="195" height="36" rx="6"/>
-      <text class="t" x="887" y="79" text-anchor="middle">目标：B 的未来 3 点</text>
-      <rect class="sp" x="790" y="120" width="195" height="36" rx="6"/>
-      <text class="t" x="887" y="143" text-anchor="middle">目标：B 的 3D 场景流</text>
-      <rect class="tr" x="790" y="184" width="195" height="36" rx="6"/>
-      <text class="t" x="887" y="207" text-anchor="middle">混入 stage 1 batch 保持</text>
-      <line class="es" x1="760" y1="74" x2="790" y2="74"/>
-      <line class="es" x1="760" y1="138" x2="790" y2="138"/>
-      <line class="ea" x1="760" y1="202" x2="790" y2="202"/>
+      <rect class="bx" x="20" y="96" width="180" height="56" rx="6"/>
+      <text class="tb" x="110" y="120" text-anchor="middle">人 ego 视频 · 第 t 帧</text>
+      <text class="ts" x="110" y="138" text-anchor="middle">本体：空 token</text>
+      <rect class="fz" x="245" y="96" width="120" height="56" rx="6"/>
+      <text class="t" x="305" y="120" text-anchor="middle">V-JEPA 2.1</text>
+      <text class="ts" x="305" y="138" text-anchor="middle">图像 · 冻结</text>
+      <line class="e" x1="200" y1="124" x2="243" y2="124" marker-end="url(#s2a)"/>
+      <rect class="tr" x="440" y="30" width="190" height="196" rx="6"/>
+      <text class="tb" x="535" y="120" text-anchor="middle">DP encoder</text>
+      <text class="ts" x="535" y="139" text-anchor="middle">训练 flow query、kp 分支</text>
+      <line class="e" x1="365" y1="124" x2="438" y2="124" marker-end="url(#s2a)"/>
+      <text class="tl" x="402" y="117" text-anchor="middle">当前帧特征</text>
+      <rect class="bx" x="680" y="46" width="80" height="36" rx="6"/>
+      <text class="t" x="720" y="69" text-anchor="middle">场景流</text>
+      <rect class="bx" x="680" y="110" width="80" height="36" rx="6"/>
+      <text class="t" x="720" y="133" text-anchor="middle">kp̂</text>
+      <rect class="nl" x="680" y="174" width="80" height="36" rx="6"/>
+      <text class="t" x="720" y="197" text-anchor="middle">z</text>
+      <line class="e" x1="630" y1="64" x2="678" y2="64" marker-end="url(#s2a)"/>
+      <line class="e" x1="630" y1="128" x2="678" y2="128" marker-end="url(#s2a)"/>
+      <line class="e" x1="630" y1="192" x2="678" y2="192" marker-end="url(#s2a)"/>
+      <rect class="sp" x="790" y="46" width="195" height="36" rx="6"/>
+      <text class="t" x="887" y="69" text-anchor="middle">全图 3D 场景流（含手）</text>
+      <rect class="sp" x="790" y="110" width="195" height="36" rx="6"/>
+      <text class="t" x="887" y="133" text-anchor="middle">同一视频的未来 3 点</text>
+      <rect class="tr" x="790" y="174" width="195" height="36" rx="6"/>
+      <text class="t" x="887" y="197" text-anchor="middle">混入 stage 1 batch 保持</text>
+      <line class="es" x1="760" y1="64" x2="790" y2="64"/>
+      <line class="es" x1="760" y1="128" x2="790" y2="128"/>
+      <line class="ea" x1="760" y1="192" x2="790" y2="192"/>
     </svg>
     </div>
-    <figcaption>人视频里没有机器人的本体状态，也没有 z。z tokens 在这一步保持纯噪声、损失权重为 0，只能靠按比例混入 stage 1 的 mocap batch，防止已经学会的"3 点 → z"被遗忘。</figcaption>
+    <figcaption>人视频里没有机器人的本体状态，也没有 z。z tokens 在这一步设为缺失、损失权重为 0，靠按比例混入 stage 1 的 mocap batch，防止已经学会的"3 点 → z"被遗忘。场景流包含手上的点：静止点过滤后，这是信号最密的部分。</figcaption>
   </figure>
 </section>
 
 <section class="stage">
-  <div class="stage-head"><h2>Stage 3 · 仿真 RL 后训练</h2><span class="tag">can-pnp</span><span class="tag">人 / 机器人视频混合</span></div>
-  <p>闭环跑在 can-pnp 仿真里，当前观测始终是 G1 相机的渲染。示范从示范池里采样：池里一开始只有人视频，成功的机器人 rollout 会被渲染成视频加进来。RL 只训练一个噪声空间的策略 π_w（DSRL），这样 z 始终经过 DP 的去噪器生成。f_ω 的用法和 SuperMimic 训练自己的策略时一样，只用来辅助训练：仿真 rollout 写进 replay buffer，f_ω 在 buffer 上交替重拟合；π_w 从 buffer 里的状态出发，在冻结的 f_ω 里想象 H 步，通过 BPTT 拿到一阶梯度。抓取和放置这类不连续的结果 f_ω 推不出来，靠仿真奖励。</p>
+  <div class="stage-head"><h2>Stage 3 · 仿真 RL 后训练</h2><span class="tag">can-pnp</span><span class="tag">FlashSAC + SGS</span><span class="tag">按轮次自模仿</span></div>
+  <p>参考实现是仓库里现有的 five-point 流程（<code>experiments/train_fivepoint.py</code>、<code>hskill/learners/flashsac/</code>、<code>hskill/data/sgs.py</code>），把其中冻结的 five-point FM 换成 DP。现有的"five-point FM + MorphMimic HumanEncoder"两段，正好对应 DP 的 kp 分支和 kp → z 分支；去掉示范输入后，actor 的输入结构和现有代码一致。每一轮先让 FlashSAC 在冻结的 DP 上学，再把成功 rollout 蒸馏回 DP。机器人数据只来自这里。</p>
   <figure>
     <div class="scroll">
-    <svg viewBox="0 0 1000 320" role="img" aria-label="Stage 3：示范池按 α 采样人视频或机器人成功 rollout，DP 在噪声策略给出的初始噪声下生成 z，经冻结 decoder 在仿真 can-pnp 执行；奖励和 f_ω 的一阶梯度回到噪声策略，成功 rollout 回流到示范池并提供配对监督。">
+    <svg viewBox="230 0 770 330" role="img" aria-label="Stage 3：SGS 从人示范回放构造的重置库里选起点；FlashSAC 的 actor π_w 读 DP 条件 tokens 输出 kp 的初始噪声 ε_kp；冻结的 DP 先生成 kp̂ 再生成 z，经冻结 decoder 在 can-pnp 执行；critic 读特权任务特征；成功 rollout 进成功池，在蒸馏阶段更新 DP 的 kp 通路。">
       <defs>
         <marker id="s3a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
         <marker id="s3r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mkr" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="s3s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mks" d="M0,0 L10,5 L0,10 z"/></marker>
       </defs>
-      <rect class="bx" x="20" y="40" width="210" height="124" rx="8"/>
-      <text class="tb" x="34" y="62">示范池（按 α 采样）</text>
-      <rect class="bx" x="34" y="74" width="182" height="32" rx="5"/>
-      <text class="t" x="125" y="95" text-anchor="middle">人 ego 视频 · 1 − α</text>
-      <rect class="rb" x="34" y="118" width="182" height="32" rx="5"/>
-      <text class="t" x="125" y="139" text-anchor="middle">机器人成功 rollout · α</text>
+      <rect class="fz" x="270" y="40" width="250" height="120" rx="8"/>
+      <text class="tb" x="395" y="62" text-anchor="middle">DP encoder（RL 阶段冻结）</text>
+      <rect class="bx" x="284" y="74" width="106" height="72" rx="5"/>
+      <text class="t" x="337" y="104" text-anchor="middle">kp 分支</text>
+      <text class="ts" x="337" y="124" text-anchor="middle">① → kp̂</text>
+      <rect class="bx" x="400" y="74" width="106" height="72" rx="5"/>
+      <text class="t" x="453" y="104" text-anchor="middle">z 分支</text>
+      <text class="ts" x="453" y="124" text-anchor="middle">② kp̂ → z</text>
 
-      <rect class="tr" x="300" y="50" width="170" height="100" rx="6"/>
-      <text class="tb" x="385" y="94" text-anchor="middle">DP encoder</text>
-      <text class="ts" x="385" y="113" text-anchor="middle">成功 rollout 自模仿慢更新</text>
-      <line class="e" x1="230" y1="100" x2="298" y2="100" marker-end="url(#s3a)"/>
-      <text class="tl" x="265" y="93" text-anchor="middle">示范</text>
+      <rect class="rb" x="270" y="226" width="160" height="52" rx="6"/>
+      <text class="tb" x="350" y="248" text-anchor="middle">actor π_w</text>
+      <text class="ts" x="350" y="266" text-anchor="middle">FlashSAC</text>
+      <line class="er" x1="337" y1="226" x2="337" y2="162" marker-end="url(#s3r)"/>
+      <text class="tl" x="345" y="196">ε_kp</text>
 
-      <rect class="rb" x="300" y="210" width="170" height="52" rx="6"/>
-      <text class="tb" x="385" y="232" text-anchor="middle">噪声策略 π_w</text>
-      <text class="ts" x="385" y="250" text-anchor="middle">RL（DSRL）</text>
-      <line class="er" x1="385" y1="210" x2="385" y2="152" marker-end="url(#s3r)"/>
-      <text class="tl" x="395" y="185">初始噪声 w</text>
+      <rect class="fz" x="580" y="70" width="150" height="60" rx="6"/>
+      <text class="t" x="655" y="96" text-anchor="middle">SuperMimic decoder</text>
+      <text class="ts" x="655" y="114" text-anchor="middle">冻结</text>
+      <line class="e" x1="520" y1="100" x2="578" y2="100" marker-end="url(#s3a)"/>
+      <text class="tl" x="549" y="93" text-anchor="middle">z</text>
 
-      <rect class="fz" x="530" y="70" width="150" height="60" rx="6"/>
-      <text class="t" x="605" y="96" text-anchor="middle">SuperMimic decoder</text>
-      <text class="ts" x="605" y="114" text-anchor="middle">冻结</text>
-      <line class="e" x1="470" y1="100" x2="528" y2="100" marker-end="url(#s3a)"/>
-      <text class="tl" x="500" y="93" text-anchor="middle">z chunk</text>
+      <rect class="bx" x="780" y="62" width="200" height="76" rx="6"/>
+      <text class="tb" x="880" y="86" text-anchor="middle">仿真 can-pnp</text>
+      <text class="ts" x="880" y="104" text-anchor="middle">G1 相机渲染 + 本体</text>
+      <text class="ts" x="880" y="122" text-anchor="middle">SGS 起点（人示范回放构造）</text>
+      <line class="e" x1="730" y1="100" x2="778" y2="100" marker-end="url(#s3a)"/>
 
-      <rect class="bx" x="740" y="70" width="245" height="60" rx="6"/>
-      <text class="tb" x="862" y="96" text-anchor="middle">仿真 can-pnp</text>
-      <text class="ts" x="862" y="114" text-anchor="middle">G1 相机渲染 + 本体</text>
-      <line class="e" x1="680" y1="100" x2="738" y2="100" marker-end="url(#s3a)"/>
-      <text class="tl" x="710" y="93" text-anchor="middle">a → PD</text>
+      <path class="e" d="M880,62 L880,22 L470,22 L470,38" marker-end="url(#s3a)"/>
+      <text class="tl" x="675" y="16" text-anchor="middle">当前帧、本体、zₜ₋₁</text>
 
-      <path class="e" d="M862,70 L862,26 L420,26 L420,48" marker-end="url(#s3a)"/>
-      <text class="tl" x="640" y="19" text-anchor="middle">当前帧特征、本体、zₜ₋₁</text>
+      <rect class="rb" x="500" y="226" width="200" height="52" rx="6"/>
+      <text class="tb" x="600" y="248" text-anchor="middle">critic（分类分布 Q）</text>
+      <text class="ts" x="600" y="266" text-anchor="middle">90 维特权特征 + action</text>
+      <path class="er" d="M840,138 L840,252 L702,252" marker-end="url(#s3r)"/>
+      <text class="tl" x="772" y="244" text-anchor="middle">奖励 + shaping</text>
+      <line class="er" x1="500" y1="252" x2="432" y2="252" marker-end="url(#s3r)"/>
 
-      <path class="er" d="M800,130 L800,230 L472,230" marker-end="url(#s3r)"/>
-      <text class="tl" x="636" y="222" text-anchor="middle">奖励：任务结果 + 3 点一致性 − KL</text>
-
-      <rect class="fz" x="530" y="246" width="150" height="34" rx="6"/>
-      <text class="t" x="605" y="268" text-anchor="middle">f_ω 想象 rollout</text>
-      <line class="er" x1="530" y1="256" x2="472" y2="256" marker-end="url(#s3r)"/>
-      <text class="tl" x="501" y="274" text-anchor="middle">一阶梯度</text>
-
-      <path class="er" d="M930,130 L930,302 L125,302 L125,166" marker-end="url(#s3r)"/>
-      <text class="tl" x="780" y="296" text-anchor="middle">成功 rollout → 机器人示范 + 配对监督（按 β 混入）</text>
+      <rect class="sp" x="780" y="280" width="200" height="40" rx="6"/>
+      <text class="t" x="880" y="305" text-anchor="middle">成功池</text>
+      <line class="es" x1="940" y1="138" x2="940" y2="278" marker-end="url(#s3s)"/>
+      <path class="es" d="M780,300 L250,300 L250,150 L282,150" marker-end="url(#s3s)"/>
+      <text class="tl" x="500" y="318" text-anchor="middle">蒸馏阶段：kp̂ 做 FM → 当前帧通路、kp 分支；场景流真值 → flow query</text>
     </svg>
     </div>
-    <figcaption>想象里的梯度链是 w → DP（冻结、可微）→ z → decoder → f_ω。奖励是头和手与 kp̂ 的一致性，加上存活（f_ω 的摔倒 head）；H 步末尾用 critic 自举，结构和 SuperMimic 的 policy_trainer 相同。和 SuperMimic 有两点不同：想象里没有新图像，视觉条件固定为起点那一帧的特征，所以 H 不宜超过一两个重规划周期；DP 的去噪链要反传梯度，去噪步数要少。f_ω 在 can-pnp 的 rollout 上重拟合，能学到一部分负载带来的动力学变化，但状态里仍然没有物体。回流的成功 rollout 作为机器人示范进入示范池（比例 α），作为配对样本进入监督 batch（比例 β）。KL 项把 z 拉回 stage 1 的先验。</figcaption>
+    <figcaption>RL 阶段 DP 整体冻结，π_w 只引导 ε_kp，ε_z 随机，所以 RL 只改"执行者接下来怎么动"。critic 是非对称的，读特权任务特征。奖励是放置的终止奖励加势函数 shaping（罐子到目标、手到罐子）。SGS 的重置库由 100 条人示范的 3 点经 stage 1 DP → decoder 在仿真里回放得到，按成功率加权抽样（峰值在 0.5），从终点往回学。</figcaption>
   </figure>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>蒸馏阶段的模块</th><th>是否更新</th><th>监督</th></tr></thead>
+    <tbody>
+      <tr><th>当前帧通路 + kp 分支</th><td><span class="c train">主体</span></td><td><span class="c sup">kp FM → 成功 rollout 中实际下发的 kp̂</span>（π_w 引导后的采样）</td></tr>
+      <tr><th>flow query + flow head</th><td><span class="c train">更新</span></td><td><span class="c sup">仿真场景流真值（全图）</span>，所有 rollout 都能用；把机器人渲染帧接到同一个场景流空间里</td></tr>
+      <tr><th>DiT 的 z 分支</th><td><span class="c fz">基本不动</span></td><td>rollout batch 里 z <span class="c null">缺失</span>，混入 stage 1 batch 守住 kp → z</td></tr>
+      <tr><th>V-JEPA、decoder</th><td><span class="c fz">冻结</span></td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <ul>
+    <li><b>kp 标签取下发的 kp̂。</b>成功就是它作为命令带来的，蒸馏的是完整的策略 π_w∘DP。如果 tracker 跟踪误差大，再改用实际 FK 做 hindsight 重标注。</li>
+    <li><b>z 分支不更新。</b>π_w 不控制 ε_z，rollout 里的 z 只是 DP 自己的采样，只多了"成功"这一层筛选，信号弱；z 分支有 stage 1 的 teacher 兜底。</li>
+    <li><b>共享主干。</b>"只更新 kp 分支"在参数上分不干净，靠 z 缺失 + 混入 stage 1 batch + KL 来约束；要隔离得更彻底，可以在 kp 分支上用 LoRA，或只解冻 kp 的进出投影和最后几层。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>按轮次交替</h2>
+  <p>π_w 的输出是 DP 的初始噪声，critic 学的是 Q(s, ε)，replay 存的是 (s, ε, r, s′)，三者都依赖 DP 当前的参数。DP 一更新，同一个 ε 生成的 kp̂ 就变了，三者一起失效。所以 DP 只在轮与轮之间更新，这就是"慢更新"。</p>
+  <ol>
+    <li><b>RL 阶段</b>：DP_k 冻结。FlashSAC 训练 π_w 和 critic，SGS 选起点，成功 rollout 存进成功池；成功率稳定或到固定步数就停。</li>
+    <li><b>蒸馏阶段</b>：π_w 不再更新。用成功池按上表训练 DP，混入 stage 1/2 数据，加 KL 拉向 DP_k，得到 DP_{k+1}。</li>
+    <li><b>重置</b>：π_w 回到初始化（和观测无关、方差与 DP 先验一致的 tanh-Gaussian），critic 重新初始化，replay 清空。SGS 的成功率历史保留，它记录的是起点难度，和 DP 参数关系不大。</li>
+  </ol>
+  <p>重置不会白学：π_w 学到的改进已经蒸馏进 DP_{k+1}，下一轮从更高的先验起步。代价是每轮都要重新热身 critic。替代方案是让 critic 读 kp̂（DSRL-NA 式：先在动作空间学 Q(s, kp̂)，再蒸馏到噪声空间），DP 更新后 critic 和 replay 仍然有效，但要改现有 critic 的输入。第一版用按轮次重置。</p>
+  <p class="m" style="font-size:13px;color:var(--muted)">相对 v5 去掉的：示范视频输入、video query、进度 φ、f_ω 想象 BPTT、3 点一致性想象奖励、示范池 α 和监督 β 的调度。</p>
 </section>
 
 <section>
   <h2>场景流标签怎么来</h2>
-  <p>标签定义：在当前帧 t 上取 N 个查询点，记录它们在 t 到 t+T 之间的 3D 位置，全部表示在 t 时刻的相机坐标系里（重力对齐）。这样头部相机自身的运动就被扣掉了。执行者自己身上的点 mask 掉，那部分由 kp 负责。</p>
+  <p>标签定义与 EgoWAM 一致：在当前帧 t 上取 N 个查询点（例如 28×40 网格，覆盖全图，包含手 / 机械臂），记录它们在 t 到 t+T 之间的 3D 位置，全部表示在 t 时刻的相机坐标系里（重力对齐），这样头部相机自身的运动就被扣掉了。静止点按位移阈值过滤（EgoWAM：机器人 2 mm、人 10 mm），剩下的运动点大多落在执行者和被操作的物体上。</p>
   <div class="tablewrap">
   <table>
     <thead><tr><th>步骤</th><th>人视频（100 条）</th><th>仿真（stage 3）</th></tr></thead>
     <tbody>
       <tr><th>相机位姿</th><td>Aria VIO、MegaSaM 或 DROID-SLAM，和取头部 3 点共用</td><td>FK 算出头部相机位姿</td></tr>
       <tr><th>查询点的 3D 位置</th><td>MegaSaM / UniDepth / MoGe-2 的度量深度反投影</td><td>深度缓冲</td></tr>
-      <tr><th>未来轨迹</th><td>Track4World / SpatialTracker v2 / TAPIP3D 直接给 3D 轨迹；或 CoTracker3 加深度</td><td>分割缓冲找到所属刚体，p_{t+k} = B_{t+k} · B_t⁻¹ · p</td></tr>
-      <tr><th>去掉执行者</th><td>HaMeR 或手部分割，去掉手和手臂上的点</td><td>分割缓冲去掉 G1 本体</td></tr>
+      <tr><th>未来轨迹</th><td>Track4World / SpatialTracker v2 / TAPIP3D 直接给 3D 轨迹；或 CoTracker3 加深度</td><td>分割缓冲找到所属刚体（物体或机器人连杆），p_{t+k} = B_{t+k} · B_t⁻¹ · p</td></tr>
       <tr><th>质量控制</th><td>遮挡点不算损失；静止背景点扣除相机运动后位移应接近 0，残差大的片段丢掉</td><td>真值，遮挡点按人视频的规则同样屏蔽</td></tr>
-      <tr><th>时间窗</th><td>人更快，T 取得短一些（EgoWAM 用 1 s）</td><td>T 取得长一些（EgoWAM 用 1.5 s），或用进度 φ 对齐</td></tr>
+      <tr><th>时间窗</th><td>人更快，T 取得短一些（EgoWAM 用 1 s）</td><td>T 取得长一些（EgoWAM 用 1.5 s）</td></tr>
     </tbody>
   </table>
   </div>
   <p class="m" style="font-size:13px;color:var(--muted)">运动点远少于静止背景，损失里对运动点加权，或按比例过采样运动区域。</p>
-</section>
-
-<section>
-  <h2>人视频和机器人视频怎么混</h2>
-  <p>需要混合的地方有两处，节奏不一样。示范来源的比例 α 要设上限：部署时给的示范永远是人视频，如果 α 升到 1，模型就忘了怎么读人视频。监督 batch 里机器人数据的比例 β 可以升得更高，因为它监督的是机器人自己的观测。</p>
-  <figure>
-    <div class="scroll chart">
-    <svg viewBox="0 0 540 230" role="img" aria-label="示意曲线：α（示范中机器人视频占比）从 0 平滑升到 0.5 后保持；β（监督中机器人 rollout 占比）从 0 升到约 0.7。">
-      <line class="grid" x1="50" y1="20" x2="500" y2="20"/>
-      <line class="grid" x1="50" y1="100" x2="500" y2="100"/>
-      <line class="grid" x1="50" y1="180" x2="500" y2="180"/>
-      <text class="tl" x="42" y="24" text-anchor="end">1.0</text>
-      <text class="tl" x="42" y="104" text-anchor="end">0.5</text>
-      <text class="tl" x="42" y="184" text-anchor="end">0</text>
-      <text class="tl" x="50" y="200" text-anchor="start">stage 3 开始</text>
-      <text class="tl" x="500" y="200" text-anchor="end">结束</text>
-      <text class="tl" x="275" y="220" text-anchor="middle">训练进度（示意曲线，不是实测）</text>
-      <polyline class="ln-b" points="50,180 95,175.2 140,160.8 185,140 230,119.2 275,101.6 320,88.8 365,79.2 410,72.8 455,69.6 500,68"/>
-      <polyline class="ln-a" points="50,180 95,178.4 140,172 185,160.8 230,144.8 275,128.8 320,116 365,108 410,103.2 455,100 500,100"/>
-      <circle class="dot-b" cx="500" cy="68" r="3.5"/>
-      <circle class="dot-a" cx="500" cy="100" r="3.5"/>
-      <text class="tl" x="494" y="58" text-anchor="end">β：监督中机器人 rollout 占比</text>
-      <text class="tl" x="494" y="118" text-anchor="end">α：示范中机器人视频占比，上限 0.5</text>
-    </svg>
-    </div>
-    <figcaption>两条曲线只表示走向，具体数值要调。池里还没有成功的机器人 rollout 时，α 实际上就是 0。</figcaption>
-  </figure>
-  <ul>
-    <li><b>示范 → 当前</b>这对组合也在变：早期全是"人示范 → 机器人执行"，这正是部署时的组合；"机器人示范 → 机器人执行"更容易，适合用来稳定训练，但不能占多数。</li>
-    <li><b>3 点一致性奖励要放宽</b>：示范场景和仿真场景里物体位置不同，奖励应该约束手相对物体的位姿和阶段进度 φ，不能逐帧约束绝对位置。</li>
-  </ul>
 </section>
 
 <section>
@@ -527,20 +489,23 @@ svg text{font-family:var(--f-body)}
     <li><b>诊断</b>：在 BONES-SEED 上批量算 z* = enc_motion(g)，看每一维的分布、饱和比例和有效维数；给 z* 加不同幅度的噪声跑闭环，测 decoder 对 z 误差的敏感度。结果决定 flow matching 直接在 z 空间做，还是先做 atanh 或标准化。</li>
     <li><b>执行接口</b>：给 SuperMimic 加一个直接从 z 出发的入口 <code>a = dec(z, o_hist)</code>。</li>
     <li><b>Stage 1</b>：移植 MorphMimic 的 student 蒸馏流程（半数环境由 student 执行，想象里当场算 teacher 标签），先用 MLP HumanEncoder 跑通，再换成 masked DiT（kp tokens 和 z tokens，逐 token 时间步，交叉注意力读条件，空 token 与来源 token）。</li>
-    <li><b>视觉通路</b>：预先算好 V-JEPA 2.1 特征；人视频跑 SLAM、HaMeR、Track4World 得到 3 点和场景流标签；实现 video query 和 flow query，训练 stage 2。</li>
-    <li><b>Stage 3</b>：can-pnp 里渲染 G1 相机、导出场景流真值；照 SuperMimic 的循环搭 replay buffer → f_ω 重拟合 → 想象 BPTT 更新 π_w，想象 rollout 里的动作换成 dec(z, o_hist)；再接入仿真任务奖励；示范池和 α、β 调度。</li>
+    <li><b>视觉通路</b>：预先算好 V-JEPA 2.1 特征；人视频跑 SLAM、HaMeR、Track4World 得到 3 点和场景流标签；实现 flow query，训练 stage 2。</li>
+    <li><b>重置库</b>：100 条人示范的 3 点经 stage 1 DP → decoder 在仿真里回放，按 phase 取起点。</li>
+    <li><b>Stage 3</b>：在 <code>train_fivepoint.py</code> 上把 five-point FM 换成 DP（actor 读 DP 条件 tokens、输出 ε_kp），tracker 换成 DiT 的 z 分支 + SuperMimic decoder；can-pnp 导出场景流真值（包含机器人连杆）；外面套一层轮次循环，加一个成功池蒸馏脚本。</li>
   </ol>
 </section>
 
 <section>
   <h2>待定问题</h2>
   <ul>
-    <li><b>示范与执行的时间对齐</b>：机器人比人慢，kp tokens 里的进度 φ 决定读示范的哪一段。φ 在 stage 1 有真值（clip 的时间索引），在 stage 2 有近似真值（A、B 按任务阶段对齐），在 stage 3 只能靠奖励间接约束。</li>
-    <li><b>三重视觉域差</b>：人的真实视频、G1 的仿真渲染、G1 的真实相机。场景流目标与外观无关；输入端靠冻结的 V-JEPA 2.1，必要时再把手 mask 掉。</li>
+    <li><b>场景流能否单独弥合人机差异</b>：EgoWAM 的结论建立在有遥操作数据兜底的前提上，我们的机器人帧要到 stage 3 才出现（仿真渲染）。关键实验是 stage 2 → stage 3 第一轮的迁移：只在人帧上训练的视觉通路，面对机器人渲染帧时 kp̂ 和 h_f 是否还合理。廉价的检验是跨执行者探针：人帧上训练"当前帧 → 未来 3 点"，在 G1 渲染帧上测试，对比加 / 不加场景流辅助回归。备选（已讨论、暂不采用）：输入里 mask 掉执行者，并加一个跨执行者共用的当前 3 点 token。</li>
+    <li><b>stage 2 没有本体</b>：人视频里模型只能从图像判断"手现在在哪"，部署时本体里有这个信息，但 stage 2 没学过去读它。如果迁移不好，给 stage 2 一个由 SLAM + HaMeR 得到的当前 3 点作为本体的替代。</li>
+    <li><b>三重视觉域差</b>：人的真实视频、G1 的仿真渲染、G1 的真实相机。</li>
     <li><b>扣除相机运动</b>：人视频用 SLAM/VIO 的头部位姿，G1 用 FK 的头部位姿。G1 走路时头部相机一直在晃，这一步比 EgoWAM 的固定相机设定重要得多。</li>
-    <li><b>先验缺任务姿态</b>：BONES-SEED 过滤掉了带物体接触的 clip，前倾、下蹲够物这类姿态可能很少，DSRL 在噪声空间里可能够不到。出现这种情况时，改用 RECAP 式的优势条件化直接微调 DP。</li>
-    <li><b>f_ω 看不到物体</b>：在 can-pnp 的 rollout 上重拟合后能学到一部分负载效应，但状态里没有物体和夹爪，抓起罐子前后的动力学变化对它来说只是部分可观测。想象奖励只用在身体和手的平滑部分。</li>
-    <li><b>伪标签噪声</b>：HaMeR 在手被遮挡时会抖。stage 1 对示范 3 点加的扰动，幅度要和实测的伪标签误差匹配。</li>
+    <li><b>先验缺任务姿态</b>：BONES-SEED 过滤掉了带物体接触的 clip，前倾、下蹲够物这类姿态可能很少，噪声空间 RL 可能够不到。按轮次蒸馏只更新 kp 通路；如果瓶颈在 z 分支（任务姿态 → z），需要再放开 z 分支，或改用 RECAP 式的优势条件化直接微调 DP。</li>
+    <li><b>按轮次蒸馏的漂移</b>：kp 通路反复吸收 π_w 的改写，可能偏离 stage 2 学到的人视频先验。蒸馏时混入 stage 2 数据并加 KL。</li>
+    <li><b>伪标签噪声</b>：HaMeR 在手被遮挡时会抖，直接进入 stage 2 的 kp 标签；做时间平滑、按置信度加权。</li>
+    <li><b>Stage 3 待确认</b>：f_ω 只留在 stage 1，stage 3 不用；kp 用 3 点还是 5 点（现有 tracker 是 human/five 版，倾向 DP 生成 3 点、脚保持 mask）。</li>
   </ul>
 </section>
 </div>
